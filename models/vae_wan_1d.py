@@ -54,6 +54,7 @@ class VAEWanModel(nn.Module):
         else:
             self.register_buffer("std", torch.ones(input_dim))
 
+        # Paper Sec 3.4: Causal VAE — encoder/decoder use causal conv so decode at time t only uses past latents (streaming decode).
         self.model = WanVAE_(
             input_dim=self.input_dim,
             dim=self.dim,
@@ -158,6 +159,7 @@ class VAEWanModel(nn.Module):
 
         return loss_dict
 
+    # inference functions
     def encode(self, x):
         x = (x - self.mean) / self.std
         x_in = self.preprocess(x)  # (bs, T, input_dim) -> (bs, input_dim, T)

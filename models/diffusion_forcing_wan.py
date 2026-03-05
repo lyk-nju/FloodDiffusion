@@ -128,8 +128,11 @@ class DiffForcingWanModel(nn.Module):
         return x
 
     def _get_noise_levels(self, device, seq_len, time_steps):
-        """Get noise levels"""
-        # noise_level[i] = clip(1 + i / chunk_size - time_steps, 0, 1)
+        """Get noise levels (Paper: vectorized schedule).
+        β^k_t = 1 - α^k_t, with α^k_t = clamp(t - k/n_s, 0, 1). So β^k_t = clamp(1 + k/n_s - t, 0, 1).
+        chunk_size = n_s (streaming step-size). Left of active window → β≈0 (clean), right → β≈1 (noise).
+        """
+        # noise_level[k] = β^k_t for position k
         noise_level = torch.clamp(
             1
             + torch.arange(seq_len, device=device) / self.chunk_size
@@ -140,15 +143,14 @@ class DiffForcingWanModel(nn.Module):
         return noise_level
 
     def add_noise(self, x, noise_level):
-        """Add noise
+        """Add noise (Paper Eq.: x_t = α_t ⊙ z + β_t ⊙ ε).
         Args:
-            x: (B, T, D)
-            noise_level: (B, T)
+            x: (B, T, D) clean latent z
+            noise_level: (B, T) β_t
         """
         noise = torch.randn_like(x)
-        # noise_level: (B, T) -> (B, T, 1)
         noise_level = noise_level.unsqueeze(-1)
-        noisy_x = x * (1 - noise_level) + noise_level * noise
+        noisy_x = x * (1 - noise_level) + noise_level * noise  # α*z + β*ε
         return noisy_x, noise
 
     def forward(self, x):
@@ -228,6 +230,7 @@ class DiffForcingWanModel(nn.Module):
                 for single_text_list, single_text_end_list in zip(
                     text_list, text_end_list
                 ):
+                    # Paper: classifier-free guidance — with prob drop_out replace text by "" at train time
                     if np.random.rand() > self.drop_out:
                         single_text_end_list = [0] + [
                             min(t, seq_len) for t in single_text_end_list
@@ -247,6 +250,7 @@ class DiffForcingWanModel(nn.Module):
                     single_text_context = [
                         u.to(self.param_dtype) for u in single_text_context
                     ]
+                    # Paper: frame-wise text conditioning — one embedding per frame so each motion frame attends only to "the text prompt active at that time"
                     for u, duration in zip(
                         single_text_context, single_text_length_list
                     ):
@@ -278,6 +282,7 @@ class DiffForcingWanModel(nn.Module):
         )  # (B, C, T, 1, 1)
 
         loss = 0.0
+        # Paper: only compute loss on active window [m(t), n(t)) (last chunk_size positions)
         for b in range(batch_size):
             if self.prediction_type == "vel":
                 vel = feature_ref[b] - noise_ref[b]  # (C, input_length, 1, 1)

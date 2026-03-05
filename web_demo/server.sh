@@ -3,8 +3,7 @@
 
 PID_FILE="server.pid"
 LOG_FILE="app.log"
-CONFIG_FILE="${2:-configs/stream.yaml}"  # Default config file
-
+export CUDA_VISIBLE_DEVICES=4
 case "$1" in
     start)
         if [ -f "$PID_FILE" ]; then
@@ -21,8 +20,8 @@ case "$1" in
         echo "Starting server..."
         echo "Config file: $CONFIG_FILE"
         source $(conda info --base)/etc/profile.d/conda.sh
-        conda activate motion_gen
-        nohup python app.py --config "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
+        conda activate flooddiffusion
+        nohup python app.py > "$LOG_FILE" 2>&1 &
         echo $! > "$PID_FILE"
         sleep 3
         
