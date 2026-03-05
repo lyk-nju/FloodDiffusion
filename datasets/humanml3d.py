@@ -10,6 +10,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from utils.initialize import instantiate
+from utils.motion_process import extract_root_trajectory_263
 
 
 class LengthMismatchError(Exception):
@@ -173,6 +174,11 @@ class HumanML3DDataset(Dataset):
             feature, feature_length = self.process_feature(data["feature"])
             output["feature"] = feature
             output["feature_length"] = feature_length
+            # 轨迹：从 crop 后的 263D feature 解析根轨迹 (T, 3)
+            traj = extract_root_trajectory_263(feature)
+            output["traj"] = traj
+            output["traj_length"] = feature_length
+            output["traj_mask"] = np.ones(feature_length, dtype=np.float32)
         ##############################
         # token
         ##############################
@@ -231,7 +237,7 @@ def collate_fn(batch):
     keys = batch[0].keys()
 
     for key in keys:
-        if key in ["feature", "token"]:
+        if key in ["feature", "token", "traj"]:
             # Pad sequences
             items = [
                 torch.from_numpy(b[key]) if isinstance(b[key], np.ndarray) else b[key]
@@ -240,7 +246,16 @@ def collate_fn(batch):
             output[key] = torch.nn.utils.rnn.pad_sequence(
                 items, batch_first=True, padding_value=0
             )
-        elif key in ["feature_length", "token_length"]:
+        elif key == "traj_mask":
+            # Pad traj_mask to (B, T_max), padding 填 0
+            items = [
+                torch.from_numpy(b[key]) if isinstance(b[key], np.ndarray) else torch.tensor(b[key], dtype=torch.float32)
+                for b in batch
+            ]
+            output[key] = torch.nn.utils.rnn.pad_sequence(
+                items, batch_first=True, padding_value=0
+            )
+        elif key in ["feature_length", "token_length", "traj_length"]:
             # Stack scalars
             output[key] = torch.tensor([b[key] for b in batch])
         else:
