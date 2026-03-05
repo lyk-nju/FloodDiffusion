@@ -340,6 +340,7 @@ class WanModel(ModelMixin, ConfigMixin):
         cross_attn_norm=True,
         eps=1e-6,
         causal=False,
+        traj_dim=0,
     ):
         r"""
         Initialize the diffusion model backbone.
@@ -397,6 +398,7 @@ class WanModel(ModelMixin, ConfigMixin):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
         self.causal = causal
+        self.traj_dim = traj_dim
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size
@@ -430,6 +432,12 @@ class WanModel(ModelMixin, ConfigMixin):
         # head
         self.head = Head(dim, out_dim, patch_size, eps)
 
+        # trajectory conditioning: concat + projection (MotionStream-style)
+        if traj_dim > 0:
+            self.traj_proj = nn.Linear(dim + traj_dim, dim)
+        else:
+            self.traj_proj = None
+
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
@@ -444,6 +452,18 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # initialize weights
         self.init_weights()
+        if self.traj_proj is not None:
+            self._init_traj_proj_zero()
+
+    def _init_traj_proj_zero(self):
+        """Zero-initialize traj_emb part so that traj_emb=0 has no effect (ControlNet-style)."""
+        with torch.no_grad():
+            # weight: (dim, dim + traj_dim), bias: (dim,)
+            # Columns [0:dim] -> identity; columns [dim:] -> zero
+            self.traj_proj.weight[:, : self.dim].copy_(torch.eye(self.dim))
+            self.traj_proj.weight[:, self.dim :].zero_()
+            if self.traj_proj.bias is not None:
+                self.traj_proj.bias.zero_()
 
     def forward(
         self,
@@ -452,6 +472,7 @@ class WanModel(ModelMixin, ConfigMixin):
         context,
         seq_len,
         y=None,
+        traj_emb=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -496,6 +517,11 @@ class WanModel(ModelMixin, ConfigMixin):
                 for u in x
             ]
         )
+
+        # trajectory conditioning: concat + projection (after patch_embed, before blocks)
+        if self.traj_proj is not None and traj_emb is not None:
+            x = torch.cat([x, traj_emb], dim=-1)
+            x = self.traj_proj(x)
 
         # time embeddings
         if t.dim() == 1:  # bs

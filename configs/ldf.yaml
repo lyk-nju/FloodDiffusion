@@ -107,6 +107,9 @@ model:
         tokenizer_path: "${dirs.deps}/t5_umt5-xxl-enc-bf16/google/umt5-xxl"
         input_dim: 4
         noise_steps: 10
+        use_traj_cond: true
+        traj_out_dim: 2
+        traj_drop_out: 0.1
 
 optimizer:
     target: AdamW

@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .tools.t5 import T5EncoderModel
+from .tools.traj_encoder import TrajEncoder
 from .tools.wan_model import WanModel
 
 
@@ -29,6 +30,9 @@ class DiffForcingWanModel(nn.Module):
         cfg_scale=5.0,
         prediction_type="vel",  # "vel", "x0", "noise"
         causal=False,
+        use_traj_cond=False,
+        traj_out_dim=2,
+        traj_drop_out=0.1,
     ):
         super().__init__()
 
@@ -46,6 +50,9 @@ class DiffForcingWanModel(nn.Module):
         self.cfg_scale = cfg_scale
         self.prediction_type = prediction_type
         self.causal = causal
+        self.use_traj_cond = use_traj_cond
+        self.traj_out_dim = traj_out_dim
+        self.traj_drop_out = traj_drop_out
 
         self.text_dim = 4096
         self.text_len = text_len
@@ -60,6 +67,7 @@ class DiffForcingWanModel(nn.Module):
 
         # Text encoding cache
         self.text_cache = {}
+        traj_dim = self.traj_out_dim if self.use_traj_cond else 0
         self.model = WanModel(
             model_type="t2v",
             patch_size=(1, 1, 1),
@@ -77,7 +85,14 @@ class DiffForcingWanModel(nn.Module):
             cross_attn_norm=True,
             eps=1e-6,
             causal=self.causal,
+            traj_dim=traj_dim,
         )
+        if self.use_traj_cond:
+            self.traj_encoder = TrajEncoder(
+                in_dim=3, hidden_dim=64, out_dim=self.traj_out_dim
+            )
+        else:
+            self.traj_encoder = None
         self.param_dtype = torch.float32
 
     def encode_text_with_cache(self, text_list, device):
@@ -272,6 +287,29 @@ class DiffForcingWanModel(nn.Module):
             all_text_context = self.encode_text_with_cache(all_text_context, device)
             all_text_context = [u.to(self.param_dtype) for u in all_text_context]
 
+        # Trajectory conditioning: align to seq_len, encode, optional dropout
+        traj_emb = None
+        if self.use_traj_cond and self.traj_encoder is not None and "traj" in x:
+            traj = x["traj"]  # (B, T_motion, 3)
+            traj_mask = x.get("traj_mask", None)
+            T_motion = traj.shape[1]
+            if T_motion != seq_len:
+                traj = F.interpolate(
+                    traj.permute(0, 2, 1),
+                    size=seq_len,
+                    mode="linear",
+                    align_corners=False,
+                ).permute(0, 2, 1)  # (B, seq_len, 3)
+            if traj_mask is not None:
+                traj_mask = F.interpolate(
+                    traj_mask.unsqueeze(1).float(),
+                    size=seq_len,
+                    mode="nearest",
+                ).squeeze(1)
+                traj = traj * traj_mask.unsqueeze(-1)
+            if np.random.rand() > self.traj_drop_out:
+                traj_emb = self.traj_encoder(traj.to(device))
+
         # Through WanModel
         predicted_result = self.model(
             noisy_feature_input,
@@ -279,6 +317,7 @@ class DiffForcingWanModel(nn.Module):
             all_text_context,
             seq_len,
             y=None,
+            traj_emb=traj_emb,
         )  # (B, C, T, 1, 1)
 
         loss = 0.0
@@ -415,7 +454,28 @@ class DiffForcingWanModel(nn.Module):
         text_null_context = self.encode_text_with_cache(text_null_list, device)
         text_null_context = [u.to(self.param_dtype) for u in text_null_context]
 
-        # print(len(all_text_context), len(text_null_context))
+        # Trajectory conditioning (no dropout at inference)
+        traj_emb = None
+        gen_seq_len = seq_len + self.chunk_size
+        if self.use_traj_cond and self.traj_encoder is not None and "traj" in x:
+            traj = x["traj"]
+            traj_mask = x.get("traj_mask", None)
+            T_motion = traj.shape[1]
+            if T_motion != gen_seq_len:
+                traj = F.interpolate(
+                    traj.permute(0, 2, 1),
+                    size=gen_seq_len,
+                    mode="linear",
+                    align_corners=False,
+                ).permute(0, 2, 1)
+            if traj_mask is not None:
+                traj_mask = F.interpolate(
+                    traj_mask.unsqueeze(1).float(),
+                    size=gen_seq_len,
+                    mode="nearest",
+                ).squeeze(1)
+                traj = traj * traj_mask.unsqueeze(-1)
+            traj_emb = self.traj_encoder(traj.to(device))
 
         # Progressively advance from t=0 to t=max_t
         for step in range(total_steps):
@@ -441,6 +501,7 @@ class DiffForcingWanModel(nn.Module):
                 all_text_context,
                 seq_len + self.chunk_size,
                 y=None,
+                traj_emb=traj_emb,
             )  # (B, C, T, 1, 1)
 
             # Adjust using CFG
@@ -451,6 +512,7 @@ class DiffForcingWanModel(nn.Module):
                     text_null_context,
                     seq_len + self.chunk_size,
                     y=None,
+                    traj_emb=traj_emb,
                 )  # (B, C, T, 1, 1)
                 predicted_result = [
                     self.cfg_scale * pv - (self.cfg_scale - 1) * pvn
@@ -608,7 +670,28 @@ class DiffForcingWanModel(nn.Module):
         text_null_context = self.encode_text_with_cache(text_null_list, device)
         text_null_context = [u.to(self.param_dtype) for u in text_null_context]
 
-        # print(len(all_text_context), len(text_null_context))
+        # Trajectory conditioning (no dropout at inference)
+        traj_emb = None
+        gen_seq_len = seq_len + self.chunk_size
+        if self.use_traj_cond and self.traj_encoder is not None and "traj" in x:
+            traj = x["traj"]
+            traj_mask = x.get("traj_mask", None)
+            T_motion = traj.shape[1]
+            if T_motion != gen_seq_len:
+                traj = F.interpolate(
+                    traj.permute(0, 2, 1),
+                    size=gen_seq_len,
+                    mode="linear",
+                    align_corners=False,
+                ).permute(0, 2, 1)
+            if traj_mask is not None:
+                traj_mask = F.interpolate(
+                    traj_mask.unsqueeze(1).float(),
+                    size=gen_seq_len,
+                    mode="nearest",
+                ).squeeze(1)
+                traj = traj * traj_mask.unsqueeze(-1)
+            traj_emb = self.traj_encoder(traj.to(device))
 
         commit_index = 0
         # Progressively advance from t=0 to t=max_t
@@ -635,6 +718,7 @@ class DiffForcingWanModel(nn.Module):
                 all_text_context,
                 seq_len + self.chunk_size,
                 y=None,
+                traj_emb=traj_emb,
             )  # (B, C, T, 1, 1)
 
             # Adjust using CFG
@@ -645,6 +729,7 @@ class DiffForcingWanModel(nn.Module):
                     text_null_context,
                     seq_len + self.chunk_size,
                     y=None,
+                    traj_emb=traj_emb,
                 )  # (B, C, T, 1, 1)
                 predicted_result = [
                     self.cfg_scale * pv - (self.cfg_scale - 1) * pvn
@@ -811,6 +896,7 @@ class DiffForcingWanModel(nn.Module):
                 text_condition,
                 min(end_index, self.seq_len),
                 y=None,
+                traj_emb=None,
             )  # (B, C, T, 1, 1)
 
             # Adjust using CFG
@@ -821,6 +907,7 @@ class DiffForcingWanModel(nn.Module):
                     text_null_context,
                     min(end_index, self.seq_len),
                     y=None,
+                    traj_emb=None,
                 )  # (B, C, T, 1, 1)
                 predicted_result = [
                     self.cfg_scale * pv - (self.cfg_scale - 1) * pvn

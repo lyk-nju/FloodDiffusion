@@ -65,6 +65,33 @@ class CustomLightningModule(BasicLightningModule):
         self.recover_dim = self.cfg.metrics.dim
         self.t2m_metrics = T2MMetrics(self.cfg.metrics.t2m)
 
+    def on_load_checkpoint(self, checkpoint):
+        use_traj_cond = self.cfg.model.params.get("use_traj_cond", False)
+        strict = not use_traj_cond
+        result = self.model.load_state_dict(checkpoint["state_dict"], strict=strict)
+        if use_traj_cond and not strict:
+            if result.missing_keys:
+                rank_zero_info(
+                    f"Loaded pretrained LDF with strict=False. Missing keys (traj, init from scratch): {result.missing_keys}"
+                )
+            if result.unexpected_keys:
+                rank_zero_info(
+                    f"Unexpected keys in checkpoint (ignored): {result.unexpected_keys}"
+                )
+        if "ema_state" in checkpoint:
+            self.ema.load_state_dict(checkpoint["ema_state"])
+            rank_zero_info("init ema from ckpt")
+        else:
+            self.ema = ExponentialMovingAverage(
+                self.model.parameters(), decay=self.cfg.model.ema_decay
+            )
+            rank_zero_info("init ema from current model weights")
+        compare_statedict_and_parameters(
+            state_dict=self.model.state_dict(),
+            named_parameters=self.model.named_parameters(),
+            named_buffers=self.model.named_buffers(),
+        )
+
     def _step(self, batch, is_training=True):
         # Create a copy and replace motion fields with token fields
         model_batch = batch.copy()
@@ -72,6 +99,10 @@ class CustomLightningModule(BasicLightningModule):
         model_batch["feature_length"] = batch["token_length"]
         if "token_text_end" in batch:
             model_batch["feature_text_end"] = batch["token_text_end"]
+        if "traj" in batch:
+            model_batch["traj"] = batch["traj"]
+            model_batch["traj_length"] = batch["traj_length"]
+            model_batch["traj_mask"] = batch["traj_mask"]
         out = self.model(model_batch)
         return out
 
@@ -82,6 +113,10 @@ class CustomLightningModule(BasicLightningModule):
             model_batch["feature_length"] = batch["token_length"]
             if "token_text_end" in batch:
                 model_batch["feature_text_end"] = batch["token_text_end"]
+            if "traj" in batch:
+                model_batch["traj"] = batch["traj"]
+                model_batch["traj_length"] = batch["traj_length"]
+                model_batch["traj_mask"] = batch["traj_mask"]
             output = self.model.generate(model_batch)
         generated = output["generated"]
         ground_truth_token = batch["token"]
@@ -137,6 +172,10 @@ class CustomLightningModule(BasicLightningModule):
             model_batch["feature_length"] = batch["token_length"]
             if "token_text_end" in batch:
                 model_batch["feature_text_end"] = batch["token_text_end"]
+            if "traj" in batch:
+                model_batch["traj"] = batch["traj"]
+                model_batch["traj_length"] = batch["traj_length"]
+                model_batch["traj_mask"] = batch["traj_mask"]
             output = self.model.generate(model_batch)
         generated = output["generated"]
         text = output["text"]

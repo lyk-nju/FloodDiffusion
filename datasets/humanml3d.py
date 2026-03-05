@@ -178,7 +178,12 @@ class HumanML3DDataset(Dataset):
             traj = extract_root_trajectory_263(feature)
             output["traj"] = traj
             output["traj_length"] = feature_length
-            output["traj_mask"] = np.ones(feature_length, dtype=np.float32)
+            # 稀疏控制：随机保留 20-30% 帧的轨迹观测，其余置 0
+            traj_mask = np.zeros(feature_length, dtype=np.float32)
+            n_keep = max(1, int(feature_length * random.uniform(0.2, 0.3)))
+            indices = random.sample(range(feature_length), n_keep)
+            traj_mask[indices] = 1.0
+            output["traj_mask"] = traj_mask
         ##############################
         # token
         ##############################
