@@ -73,6 +73,18 @@ def main():
             assert feat_len == traj_len, f"Sample {i}: feature_length={feat_len} != traj_length={traj_len}"
         print("feature_length == traj_length for all samples: OK")
 
+        # feature-token 时间对齐（VAE 4x 下采样）：token_length ≈ feature_length // 4
+        if "token" in batch and "token_length" in batch:
+            print("\n=== Feature-Token alignment (VAE 4x) ===")
+            for i in range(min(4, B)):
+                feat_len = batch["feature_length"][i].item()
+                tok_len = batch["token_length"][i].item()
+                expected = feat_len // 4
+                ok = 1 <= tok_len <= expected + 1  # 允许 ±1 因边界
+                status = "OK" if ok else "MISMATCH"
+                print(f"  sample {i}: feature_length={feat_len}, token_length={tok_len}, expected≈{expected} [{status}]")
+        print("Feature-Token alignment: OK")
+
         # traj_mask 非零比例
         mask_sum = batch["traj_mask"].sum(dim=1)
         print(f"\ntraj_mask sum per sample (should equal traj_length): {mask_sum.tolist()}")

@@ -170,8 +170,10 @@ class HumanML3DDataset(Dataset):
         ##############################
         # feature
         ##############################
+        crop_start = 0
+        feature_length = None
         if "feature" in data:
-            feature, feature_length = self.process_feature(data["feature"])
+            feature, feature_length, crop_start = self.process_feature(data["feature"])
             output["feature"] = feature
             output["feature_length"] = feature_length
             # 轨迹：从 crop 后的 263D feature 解析根轨迹 (T, 3)
@@ -185,10 +187,14 @@ class HumanML3DDataset(Dataset):
             traj_mask[indices] = 1.0
             output["traj_mask"] = traj_mask
         ##############################
-        # token
+        # token：与 feature 对齐（同一 crop 窗口），VAE 时间下采样 4x
         ##############################
         if "token" in data:
-            token, token_length = self.process_token(data["token"])
+            token, token_length = self.process_token(
+                data["token"],
+                crop_start=crop_start if feature_length is not None else None,
+                feature_length=feature_length,
+            )
             output["token"] = token
             output["token_length"] = token_length
         ##############################
@@ -209,16 +215,28 @@ class HumanML3DDataset(Dataset):
 
     def process_feature(self, feature):
         feature_len = feature.shape[0]
+        crop_start = 0
         # if the motion is longer than window_length, randomly crop a window_length clip
         if feature_len > self.window_length:
-            start = random.randint(0, feature_len - self.window_length)
-            feature = feature[start : start + self.window_length]
+            crop_start = random.randint(0, feature_len - self.window_length)
+            feature = feature[crop_start : crop_start + self.window_length]
             feature_len = self.window_length
-        return feature, feature_len
+        return feature, feature_len, crop_start
 
-    def process_token(self, token):
+    def process_token(self, token, crop_start=None, feature_length=None):
+        """Process token. When crop_start and feature_length are provided (from feature crop),
+        crop token to align with feature (VAE temporal factor 4). Otherwise use original random crop."""
         token_length = len(token)
-        if token_length > self.random_length:
+        if crop_start is not None and feature_length is not None:
+            # Align token with feature: token_start = crop_start//4, token_len = feature_length//4
+            token_start = crop_start // 4
+            token_len = feature_length // 4
+            end = min(token_start + token_len, token_length)
+            if token_start >= token_length or token_len <= 0:
+                token = token[:1]  # fallback: at least 1 token
+            else:
+                token = token[token_start:end]
+        elif token_length > self.random_length:
             new_token_length = token_length - random.randint(0, self.random_length)
             start = random.randint(0, token_length - new_token_length)
             token = token[start : start + new_token_length]
