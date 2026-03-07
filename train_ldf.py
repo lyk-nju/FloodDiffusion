@@ -70,6 +70,7 @@ class CustomLightningModule(BasicLightningModule):
         use_traj_cond = self.cfg.model.params.get("use_traj_cond", False)
         strict = not use_traj_cond
         result = self.model.load_state_dict(checkpoint["state_dict"], strict=strict)
+        has_new_traj_params = use_traj_cond and result.missing_keys
         if use_traj_cond and not strict:
             if result.missing_keys:
                 rank_zero_info(
@@ -79,7 +80,8 @@ class CustomLightningModule(BasicLightningModule):
                 rank_zero_info(
                     f"Unexpected keys in checkpoint (ignored): {result.unexpected_keys}"
                 )
-        if "ema_state" in checkpoint:
+        # When loading pretrained with new traj params, ema_state has wrong param count -> reinit EMA
+        if "ema_state" in checkpoint and not has_new_traj_params:
             self.ema.load_state_dict(checkpoint["ema_state"])
             rank_zero_info("init ema from ckpt")
         else:
@@ -87,6 +89,12 @@ class CustomLightningModule(BasicLightningModule):
                 self.model.parameters(), decay=self.cfg.model.ema_decay
             )
             rank_zero_info("init ema from current model weights")
+        # When has_new_traj_params, optimizer/scheduler param groups mismatch -> skip restore
+        # Set to empty lists (don't pop) so Lightning passes "key exists" check but restores nothing
+        if has_new_traj_params:
+            checkpoint["optimizer_states"] = []
+            checkpoint["lr_schedulers"] = []
+            rank_zero_info("Skip restoring optimizer/scheduler (new traj params)")
         compare_statedict_and_parameters(
             state_dict=self.model.state_dict(),
             named_parameters=self.model.named_parameters(),
