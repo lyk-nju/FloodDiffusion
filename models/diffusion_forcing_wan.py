@@ -344,6 +344,24 @@ class DiffForcingWanModel(nn.Module):
         loss = loss / batch_size
 
         loss_dict = {"total": loss, "mse": loss}
+
+        # MotionLCM-style control loss: prepare pred_x0_latent for decoding (train_ldf will add L_control)
+        if (
+            self.use_traj_cond
+            and "traj" in x
+            and self.prediction_type in ("vel", "x0")
+        ):
+            pred_x0_latent_list = []
+            for b in range(batch_size):
+                if self.prediction_type == "vel":
+                    pred_x0 = predicted_result[b] + noise_ref[b]
+                else:
+                    pred_x0 = predicted_result[b]
+                # (C, T, 1, 1) -> (T, C) for VAE decode
+                p = pred_x0[:, :, 0, 0].permute(1, 0)
+                pred_x0_latent_list.append(p)
+            loss_dict["control_aux"] = {"pred_x0_latent_list": pred_x0_latent_list}
+
         return loss_dict
 
     def generate(self, x, num_denoise_steps=None):

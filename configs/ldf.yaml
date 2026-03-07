@@ -4,7 +4,7 @@ debug: false
 train: true
 
 save_dir: ./outputs
-resume_ckpt: null
+resume_ckpt: "${dirs.outputs}/20251106_063218_ldf/step_step=50000.ckpt"
 test_ckpt: "${dirs.outputs}/20251106_063218_ldf/step_step=50000.ckpt"
 test_vae_ckpt: "${dirs.outputs}/vae_1d_z4_step=300000.ckpt"
 test_vae:
@@ -110,6 +110,7 @@ model:
         use_traj_cond: true
         traj_out_dim: 2
         traj_drop_out: 0.1
+        control_loss_weight: 1.0  # MotionLCM-style explicit trajectory alignment
 
 optimizer:
     target: AdamW

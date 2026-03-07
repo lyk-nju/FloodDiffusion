@@ -55,6 +55,20 @@ def extract_root_trajectory_263(feature_263: np.ndarray) -> np.ndarray:
     return r_pos.squeeze(0).cpu().numpy()
 
 
+def extract_root_trajectory_263_torch(feature_263: torch.Tensor) -> torch.Tensor:
+    """
+    从 263 维 motion 中提取根节点 3D 轨迹（PyTorch 版本，用于 control loss）。
+
+    Args:
+        feature_263: (B, T, 263) tensor
+
+    Returns:
+        r_pos: (B, T, 3)，根节点每帧的 3D 位置 (x, y, z)
+    """
+    _, r_pos = recover_root_rot_pos(feature_263)
+    return r_pos
+
+
 def recover_joint_positions_263(data: np.ndarray, joints_num) -> np.ndarray:
     """
     Recovers 3D joint positions from the rotation-invariant local positions (ric_data).

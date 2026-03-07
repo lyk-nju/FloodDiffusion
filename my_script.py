@@ -2,7 +2,7 @@ from transformers import AutoModel
 
 # Load model
 model = AutoModel.from_pretrained(
-    "ShandaAI/FloodDiffusion",
+    "ShandaAI/FloodDiffusionTiny",
     trust_remote_code=True
 )
 

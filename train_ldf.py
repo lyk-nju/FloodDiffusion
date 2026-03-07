@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from torch_ema import ExponentialMovingAverage
 
 from metrics.t2m import T2MMetrics
+from utils.motion_process import extract_root_trajectory_263_torch
 from utils.initialize import (
     compare_statedict_and_parameters,
     get_function,
@@ -104,6 +105,47 @@ class CustomLightningModule(BasicLightningModule):
             model_batch["traj_length"] = batch["traj_length"]
             model_batch["traj_mask"] = batch["traj_mask"]
         out = self.model(model_batch)
+
+        # MotionLCM-style control loss: explicit trajectory alignment in motion space
+        if "control_aux" in out and "traj" in batch:
+            control_weight = self.cfg.model.params.get("control_loss_weight", 1.0)
+            if control_weight > 0:
+                pred_list = out["control_aux"]["pred_x0_latent_list"]
+                traj = batch["traj"]
+                traj_mask = batch["traj_mask"]
+                traj_length = batch["traj_length"]
+                vae_downsample = 4
+                loss_control = 0.0
+                n_valid = 0
+                for i in range(len(pred_list)):
+                    pred_latent = pred_list[i].to(self.device)  # (T_token, 4)
+                    decoded = self.vae.decode(pred_latent.unsqueeze(0))[0]
+                    decoded = decoded.float()
+                    L_motion = decoded.size(0)
+                    L_gt = min(int(traj_length[i].item()), traj.shape[1])
+                    L = min(L_motion, L_gt)
+                    if L <= 0:
+                        continue
+                    pred_traj = extract_root_trajectory_263_torch(
+                        decoded[:L].unsqueeze(0)
+                    )  # (1, L, 3)
+                    gt_traj = traj[i, :L, :].unsqueeze(0).to(
+                        pred_traj.device, dtype=pred_traj.dtype
+                    )
+                    mask = traj_mask[i, :L].unsqueeze(0).to(
+                        pred_traj.device, dtype=pred_traj.dtype
+                    )
+                    sq_err = ((pred_traj - gt_traj) ** 2).sum(dim=-1)
+                    masked_err = (mask * sq_err).sum()
+                    n_valid += mask.sum().item()
+                    loss_control = loss_control + masked_err
+                if n_valid > 0:
+                    loss_control = loss_control / n_valid
+                    out["total"] = out["total"] + control_weight * loss_control
+                    out["control"] = loss_control
+
+        if "control_aux" in out:
+            del out["control_aux"]
         return out
 
     def update_metrics(self, batch):
