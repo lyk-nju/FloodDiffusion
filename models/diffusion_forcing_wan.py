@@ -33,6 +33,7 @@ class DiffForcingWanModel(nn.Module):
         use_traj_cond=False,
         traj_out_dim=2,
         traj_drop_out=0.1,
+        control_loss_weight=1.0,  # used by train_ldf, not by model
     ):
         super().__init__()
 

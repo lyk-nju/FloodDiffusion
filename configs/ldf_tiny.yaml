@@ -119,6 +119,10 @@ model:
         cfg_scale: 5.0
         prediction_type: "vel"
         causal: False
+        use_traj_cond: true
+        traj_out_dim: 2
+        traj_drop_out: 0.1
+        control_loss_weight: 1.0
 
 optimizer:
     target: AdamW
