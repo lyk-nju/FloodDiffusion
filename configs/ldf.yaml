@@ -80,14 +80,14 @@ metrics:
 data:
     target: datasets.humanml3d.HumanML3DDataset
     collate_fn: datasets.humanml3d.collate_fn
-    train_bs: 16
-    val_bs: 16
-    test_bs: 16
+    train_bs: 4
+    val_bs: 4
+    test_bs: 4
     num_workers: 8
     train_meta_paths:
         - ${dirs.raw_data}/HumanML3D/train.txt
     val_meta_paths:
-        - ${dirs.raw_data}/HumanML3D/val.txt
+        - ${dirs.raw_data}/HumanML3D/val_debug.txt
         # - ${dirs.raw_data}/HumanML3D/test_min.txt
         # - ${dirs.raw_data}/HumanML3D/test.txt
     test_meta_paths:
@@ -111,6 +111,7 @@ model:
         traj_out_dim: 2
         traj_drop_out: 0.1
         control_loss_weight: 1.0  # MotionLCM-style explicit trajectory alignment
+        freeze_backbone_for_traj: true  # 只微调轨迹分支（文本 & 主干冻结）
 
 optimizer:
     target: AdamW

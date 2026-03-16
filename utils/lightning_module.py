@@ -41,11 +41,13 @@ class BasicLightningModule(LightningModule):
         optim_target = self.cfg.optimizer.target
         if len(optim_target.split(".")) == 1:
             optim_target = "torch.optim." + optim_target
+        # 只对 requires_grad=True 的参数构建优化器，便于冻结主干仅训练轨迹分支
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         optimizer = instantiate(
             target=optim_target,
             cfg=None,
             hfstyle=False,
-            params=self.model.parameters(),
+            params=trainable_params,
             **self.cfg.optimizer.params,
         )
 

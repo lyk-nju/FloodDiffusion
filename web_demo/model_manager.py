@@ -57,7 +57,8 @@ class FrameBuffer:
 
 class ModelManager:
     """
-    Manages model loading and real-time frame generation
+    Manages model loading and real-time frame generation.
+    Trajectory control is active only when the loaded config has use_traj_cond=True.
     """
     def __init__(self, config_path=None):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -78,6 +79,12 @@ class ModelManager:
         self.is_generating = False
         self.generation_thread = None
         self.should_stop = False
+        
+        # Trajectory control: waypoints → interpolated path (one point per token step)
+        self.current_traj_waypoints = None
+        self.current_traj_array = None  # (N, 3) float32, N = TRAJ_INTERP_LENGTH
+        self.traj_token_index = 0
+        self.TRAJ_INTERP_LENGTH = 2000
         
         # Model generation state
         self.first_chunk = True
@@ -130,16 +137,28 @@ class ModelManager:
                 target=cfg.model.target, cfg=None, hfstyle=False, **cfg.model.params
             )
             checkpoint = torch.load(cfg.test_ckpt, map_location="cpu", weights_only=False)
-            
+            use_traj_cond = cfg.model.params.get("use_traj_cond", False)
+            strict_load = not use_traj_cond  # Allow missing traj params when loading old ckpt
+            load_result = model.load_state_dict(
+                checkpoint["state_dict"], strict=strict_load
+            )
+            if use_traj_cond and not strict_load:
+                if load_result.missing_keys:
+                    print(
+                        f"Loaded with strict=False (traj). Missing keys (init from scratch): {load_result.missing_keys}"
+                    )
+                if load_result.unexpected_keys:
+                    print(f"Unexpected keys (ignored): {load_result.unexpected_keys}")
+
             if "ema_state" in checkpoint:
-                model.load_state_dict(checkpoint["state_dict"], strict=True)
-                ema = ExponentialMovingAverage(model.parameters(), decay=cfg.model.ema_decay)
+                ema = ExponentialMovingAverage(
+                    model.parameters(), decay=cfg.model.ema_decay
+                )
                 ema.load_state_dict(checkpoint["ema_state"])
                 ema.copy_to(model.parameters())
-                print(f"Loaded model with EMA")
+                print("Loaded model with EMA")
             else:
-                model.load_state_dict(checkpoint["state_dict"], strict=True)
-                print(f"Loaded model without EMA")
+                print("Loaded model without EMA")
             
             model.to(self.device)
             model.eval()
@@ -163,6 +182,7 @@ class ModelManager:
             self.stream_recovery.reset()
             self.vae.clear_cache()
             self.first_chunk = True
+            self.traj_token_index = 0
             self.model.init_generated(self.history_length, batch_size=1, num_denoise_steps=self.denoise_steps)
             print(f"Model initialized with history length: {self.history_length}, denoise steps: {self.denoise_steps}")
             
@@ -181,6 +201,31 @@ class ModelManager:
             # Don't reset first_chunk, stream_recovery, or vae cache
             # This allows continuous generation with text changes
             print(f"Text updated: '{old_text}' -> '{text}' (continuous generation)")
+
+    def update_trajectory(self, waypoints):
+        """Update trajectory control from waypoints (list of [x,z] or [x,y,z]).
+        Waypoints are interpolated to a fixed-length path for streaming.
+        Pass None to clear trajectory control.
+        """
+        if waypoints is None or len(waypoints) == 0:
+            self.current_traj_waypoints = None
+            self.current_traj_array = None
+            print("Trajectory control cleared")
+            return
+        waypoints = np.array(waypoints, dtype=np.float64)
+        if waypoints.ndim == 1:
+            waypoints = waypoints.reshape(1, -1)
+        if waypoints.shape[1] == 2:
+            waypoints = np.c_[waypoints[:, 0], np.zeros(len(waypoints)), waypoints[:, 1]]
+        n = len(waypoints)
+        indices = np.linspace(0, n - 1, self.TRAJ_INTERP_LENGTH, dtype=np.float64)
+        self.current_traj_array = np.stack([
+            np.interp(indices, np.arange(n), waypoints[:, 0]),
+            np.interp(indices, np.arange(n), waypoints[:, 1]),
+            np.interp(indices, np.arange(n), waypoints[:, 2]),
+        ], axis=1).astype(np.float32)
+        self.current_traj_waypoints = waypoints
+        print(f"Trajectory updated: {n} waypoints -> {len(self.current_traj_array)} interpolated points")
     
     def pause_generation(self):
         """Pause generation (keeps all state)"""
@@ -223,6 +268,7 @@ class ModelManager:
         self.frame_buffer.clear()
         self.vae.clear_cache()
         self.first_chunk = True
+        self.traj_token_index = 0
         
         if history_length is not None:
             self.history_length = history_length
@@ -251,7 +297,9 @@ class ModelManager:
         print(f"Model reset - history: {self.history_length}, smoothing: {self.smoothing_alpha}, steps: {self.denoise_steps}")
     
     def _generation_loop(self):
-        """Main generation loop that runs in background thread"""
+        """Background loop: each iteration produces one latent token (→ 4 motion frames).
+        When trajectory is set, passes one traj point per step into the model's stream buffer.
+        """
         print("Generation loop started")
         
         import time
@@ -267,12 +315,17 @@ class ModelManager:
                         
                         # Generate one token (produces 4 frames from VAE)
                         x = {"text": [self.current_text]}
+                        if self.current_traj_array is not None:
+                            idx = min(self.traj_token_index, self.current_traj_array.shape[0] - 1)
+                            x["traj"] = self.current_traj_array[idx : idx + 1]
                         
                         # Generate from model (1 token)
                         # Note: denoise_steps is set in init_generated, not here
                         output = self.model.stream_generate_step(
                             x, first_chunk=self.first_chunk
                         )
+                        if self.current_traj_array is not None:
+                            self.traj_token_index += 1
                         generated = output["generated"]
                         
                         # Decode with VAE (1 token -> 4 frames)
@@ -323,6 +376,7 @@ class ModelManager:
             "target_size": self.frame_buffer.target_size,
             "is_generating": self.is_generating,
             "current_text": self.current_text,
+            "trajectory_active": self.current_traj_array is not None,
             "smoothing_alpha": self.smoothing_alpha,
             "denoise_steps": self.denoise_steps,
         }

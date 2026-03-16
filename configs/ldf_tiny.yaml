@@ -4,7 +4,7 @@ debug: false
 train: true
 
 save_dir: ./outputs
-resume_ckpt: null
+resume_ckpt: "${dirs.outputs}/20251217_023720_ldf_tiny/step_step=60000.ckpt"
 test_ckpt: "${dirs.outputs}/20251217_023720_ldf_tiny/step_step=60000.ckpt"
 test_vae_ckpt: "${dirs.outputs}/vae_1d_z4_step=300000.ckpt"
 test_vae:
@@ -33,13 +33,14 @@ logger:
 trainer: # lightning trainer
     max_steps: 300000
     accelerator: gpu
-    devices: [0]
+    devices: [0,1,2,3,4]
+    accumulate_grad_batches: 8  # effective bs = 8 * 8 = 64
     log_every_n_steps: 100
     precision: bf16-mixed
 validation:
     validation_steps: 10000
-    test_steps: 10000
-    save_every_n_steps: 10000
+    test_steps: 20000
+    save_every_n_steps: 2000
     save_top_k: 100
 metrics:
     dim: 263
@@ -80,9 +81,9 @@ metrics:
 data:
     target: datasets.humanml3d.HumanML3DDataset
     collate_fn: datasets.humanml3d.collate_fn
-    train_bs: 512
-    val_bs: 128
-    test_bs: 16
+    train_bs: 16   # reduced for single-GPU OOM; effective bs = 8 * accumulate_grad_batches
+    val_bs: 4
+    test_bs: 1
     num_workers: 8
     train_meta_paths:
         - ${dirs.raw_data}/HumanML3D/train.txt
@@ -123,11 +124,12 @@ model:
         traj_out_dim: 2
         traj_drop_out: 0.1
         control_loss_weight: 1.0
+        freeze_backbone_for_traj: true  # 只微调轨迹分支（文本 & 主干冻结）
 
 optimizer:
     target: AdamW
     params:
-        lr: 1e-3
+        lr: 5e-5
         betas: [0.9, 0.99]
         weight_decay: 0.0
         eps: 1e-8

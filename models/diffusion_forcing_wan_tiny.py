@@ -73,6 +73,7 @@ class DiffForcingWanModel(nn.Module):
         traj_out_dim=2,
         traj_drop_out=0.1,
         control_loss_weight=1.0,  # used by train_ldf, not by model
+        freeze_backbone_for_traj=False,
     ):
         super().__init__()
 
@@ -136,6 +137,21 @@ class DiffForcingWanModel(nn.Module):
         else:
             self.traj_encoder = None
         self.param_dtype = torch.float32
+
+        # Optionally freeze backbone when adding trajectory branch, so we only train traj-related parts
+        if freeze_backbone_for_traj:
+            # 1) HuggingFace encoder 已在 HFT5Encoder 内部 requires_grad_(False)，且包装类无 .parameters()，这里不再遍历冻结
+
+            # 2) Freeze WanModel backbone, keep only traj_proj trainable
+            for name, p in self.model.named_parameters():
+                if "traj_proj" in name:
+                    continue
+                p.requires_grad = False
+
+            # 3) Keep TrajEncoder trainable (trajectory branch)
+            if self.traj_encoder is not None:
+                for p in self.traj_encoder.parameters():
+                    p.requires_grad = True
 
     def encode_text_with_cache(self, text_list, device):
         """Encode text using cache

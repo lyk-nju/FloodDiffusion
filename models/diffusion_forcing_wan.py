@@ -96,6 +96,22 @@ class DiffForcingWanModel(nn.Module):
             self.traj_encoder = None
         self.param_dtype = torch.float32
 
+        # Optionally freeze backbone when adding trajectory branch, so we only train traj-related parts
+        freeze_backbone_for_traj = getattr(self, "freeze_backbone_for_traj", False)
+        if freeze_backbone_for_traj:
+            # 1) Freeze text encoder
+            
+            # 2) Freeze WanModel backbone, keep only traj_proj trainable
+            for name, p in self.model.named_parameters():
+                if "traj_proj" in name:
+                    continue
+                p.requires_grad = False
+
+            # 3) Keep TrajEncoder trainable (trajectory branch)
+            if self.traj_encoder is not None:
+                for p in self.traj_encoder.parameters():
+                    p.requires_grad = True
+
     def encode_text_with_cache(self, text_list, device):
         """Encode text using cache
         Args:
@@ -830,6 +846,8 @@ class DiffForcingWanModel(nn.Module):
         )
         self.generated = self.preprocess(self.generated)  # (B, C, T, 1, 1)
         self.commit_index = 0
+        # Trajectory buffer for streaming: (B, seq_len*2+chunk_size, 3); clear so reset() stops conditioning on old traj
+        self.traj_buffer = None
 
     @torch.no_grad()
     def stream_generate_step(self, x, first_chunk=True):
@@ -846,6 +864,32 @@ class DiffForcingWanModel(nn.Module):
         device = next(self.parameters()).device
         if first_chunk:
             self.generated = self.generated.to(device)
+
+        # Init or update trajectory buffer for streaming (when use_traj_cond)
+        buf_len = self.seq_len * 2 + self.chunk_size
+        if self.use_traj_cond and self.traj_encoder is not None:
+            if "traj" not in x or x["traj"] is None:
+                self.traj_buffer = None  # Clear when user clears trajectory; no conditioning
+            else:
+                if self.traj_buffer is None:
+                    self.traj_buffer = torch.zeros(
+                        self.batch_size, buf_len, 3, device=device, dtype=torch.float32
+                    )
+                else:
+                    self.traj_buffer = self.traj_buffer.to(device)
+                traj_in = x["traj"]
+                if isinstance(traj_in, np.ndarray):
+                    traj_in = torch.from_numpy(traj_in).float().to(device)
+                if traj_in.dim() == 2:
+                    traj_in = traj_in.unsqueeze(0)
+                if traj_in.dim() == 1:
+                    traj_in = traj_in.unsqueeze(0).unsqueeze(0)
+                if traj_in.dim() == 3 and traj_in.size(0) == self.batch_size:
+                    k = min(traj_in.size(1), buf_len - self.commit_index)
+                    if k > 0:
+                        self.traj_buffer[
+                            :, self.commit_index : self.commit_index + k, :
+                        ] = traj_in[:, :k, :].to(device)
 
         # Encode text condition (using cache)
         if self.use_text_cond and "text" in x:
@@ -898,6 +942,32 @@ class DiffForcingWanModel(nn.Module):
                     self.text_condition_list[i][:end_index][-self.seq_len :]
                 )  # (T, D, 4096)
 
+            # Trajectory conditioning: slice buffer to current window [end_index-seq_len, end_index)
+            traj_emb = None
+            if (
+                self.use_traj_cond
+                and self.traj_encoder is not None
+                and self.traj_buffer is not None
+            ):
+                start_t = max(0, end_index - self.seq_len)
+                traj_slice = self.traj_buffer[:, start_t:end_index, :]
+                if traj_slice.size(1) < self.seq_len:
+                    pad_len = self.seq_len - traj_slice.size(1)
+                    traj_slice = torch.cat(
+                        [
+                            torch.zeros(
+                                self.batch_size,
+                                pad_len,
+                                3,
+                                device=traj_slice.device,
+                                dtype=traj_slice.dtype,
+                            ),
+                            traj_slice,
+                        ],
+                        dim=1,
+                    )
+                traj_emb = self.traj_encoder(traj_slice)
+
             # print("////////////////////")
             # print("current step: ", self.current_step)
             # print("chunk size: ", self.chunk_size)
@@ -915,7 +985,7 @@ class DiffForcingWanModel(nn.Module):
                 text_condition,
                 min(end_index, self.seq_len),
                 y=None,
-                traj_emb=None,
+                traj_emb=traj_emb,
             )  # (B, C, T, 1, 1)
 
             # Adjust using CFG
@@ -926,7 +996,7 @@ class DiffForcingWanModel(nn.Module):
                     text_null_context,
                     min(end_index, self.seq_len),
                     y=None,
-                    traj_emb=None,
+                    traj_emb=traj_emb,
                 )  # (B, C, T, 1, 1)
                 predicted_result = [
                     self.cfg_scale * pv - (self.cfg_scale - 1) * pvn
@@ -1004,6 +1074,20 @@ class DiffForcingWanModel(nn.Module):
                 ],
                 dim=2,
             )
+            if self.traj_buffer is not None:
+                self.traj_buffer = torch.cat(
+                    [
+                        self.traj_buffer[:, self.seq_len :, :],
+                        torch.zeros(
+                            self.batch_size,
+                            self.seq_len,
+                            3,
+                            device=device,
+                            dtype=self.traj_buffer.dtype,
+                        ),
+                    ],
+                    dim=1,
+                )
             self.current_step -= self.seq_len * self.num_denoise_steps / self.chunk_size
             self.commit_index -= self.seq_len
             for i in range(self.batch_size):

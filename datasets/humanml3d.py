@@ -176,18 +176,15 @@ class HumanML3DDataset(Dataset):
             feature, feature_length, crop_start = self.process_feature(data["feature"])
             output["feature"] = feature
             output["feature_length"] = feature_length
-            # 轨迹：从 crop 后的 263D feature 解析根轨迹 (T, 3)
+        ##############################
+        # traj
+        ##############################
             traj = extract_root_trajectory_263(feature)
             output["traj"] = traj
-            output["traj_length"] = feature_length
-            # 稀疏控制：随机保留 20-30% 帧的轨迹观测，其余置 0
-            traj_mask = np.zeros(feature_length, dtype=np.float32)
-            n_keep = max(1, int(feature_length * random.uniform(0.2, 0.3)))
-            indices = random.sample(range(feature_length), n_keep)
-            traj_mask[indices] = 1.0
-            output["traj_mask"] = traj_mask
+            output["traj_length"] = len(traj)
+            output["traj_mask"] = np.ones(len(traj), dtype=np.float32)
         ##############################
-        # token：与 feature 对齐（同一 crop 窗口），VAE 时间下采样 4x
+        # token
         ##############################
         if "token" in data:
             token, token_length = self.process_token(

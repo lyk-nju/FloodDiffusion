@@ -225,6 +225,47 @@ def update_text():
         }), 500
 
 
+@app.route('/api/update_trajectory', methods=['POST'])
+def update_trajectory():
+    """Update trajectory control (waypoints). Pass waypoints as list of [x,z] or [x,y,z]. Pass null/empty to clear."""
+    try:
+        data = request.json or {}
+        session_id = data.get('session_id')
+        waypoints = data.get('waypoints')
+        
+        if not session_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'session_id is required'
+            }), 400
+        
+        if model_manager is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'Model not initialized (start generation first)'
+            }), 400
+        
+        if waypoints is not None and len(waypoints) > 0:
+            with session_lock:
+                if active_session_id != session_id:
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Not the active session'
+                    }), 403
+        
+        model_manager.update_trajectory(waypoints)
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Trajectory updated' if waypoints else 'Trajectory cleared'
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
 @app.route('/api/pause', methods=['POST'])
 def pause_generation():
     """Pause generation (keeps state for resume)"""
