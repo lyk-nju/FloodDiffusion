@@ -216,6 +216,9 @@ class CustomLightningModule(BasicLightningModule):
             self.log(f"metrics/t2m_metrics/{key}", value, sync_dist=False)
 
     def update_test(self, batch):
+        # 在每次 test 生成前固定随机种子，保证扩散噪声完全一致
+        seed_everything(self.cfg.seed)
+        
         with self.ema.average_parameters(self.model.parameters()):
             model_batch = batch.copy()
             model_batch["feature"] = batch["token"]
@@ -463,7 +466,12 @@ def main():
 
     if cfg.train:
         if not cfg.debug:
-            trainer.validate(model, dataloaders=[val_dataloader, test_dataloader])
+            trainer.validate(
+                model,
+                dataloaders=[val_dataloader, test_dataloader],
+                ckpt_path=cfg.resume_ckpt,
+                weights_only=False,
+            )
         trainer.fit(
             model,
             train_dataloader,
