@@ -8,12 +8,10 @@ from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 
 from utils.motion_process import convert_motion_to_joints
-from utils.motion_process import extract_root_trajectory_263
 from utils.render_skeleton import (
     get_humanml3d_chains,
     render_simple_skeleton_video,
     render_skeleton_video,
-    render_root_trajectory_video,
 )
 
 
@@ -25,6 +23,7 @@ def render_single_video(
     mean_np: np.ndarray = None,
     std_np: np.ndarray = None,
     frames: np.ndarray = None,
+    traj_mask: np.ndarray = None,
 ):
     chains = get_humanml3d_chains()
     joint_positions = convert_motion_to_joints(motion, dim, mean_np, std_np)
@@ -35,6 +34,8 @@ def render_single_video(
             out_path=save_path,
             fps=render_setting.get("fps", 20),
             frames=frames,
+            traj_mask=traj_mask,
+            traj_mask_point_radius=int(render_setting.get("traj_mask_point_radius", 4)),
         )
     else:
         render_skeleton_video(
@@ -51,6 +52,7 @@ def render_video(
     save_dir: str,
     render_setting,
     frames_dir: str = None,
+    traj_mask_dir: str = None,
 ):
     os.makedirs(save_dir, exist_ok=True)
     motion_path = Path(motion_dir)
@@ -72,6 +74,12 @@ def render_video(
         output_filename = npy_file.stem + ".mp4"
         output_path = os.path.join(save_dir, output_filename)
 
+        traj_mask = None
+        if traj_mask_dir is not None and os.path.exists(traj_mask_dir):
+            mask_path = os.path.join(traj_mask_dir, npy_file.name)
+            if os.path.exists(mask_path):
+                traj_mask = np.load(mask_path)
+
         if frames_dir is not None and os.path.exists(frames_dir):
             frames_path = os.path.join(frames_dir, npy_file.name)
             frames = np.load(frames_path)
@@ -87,6 +95,7 @@ def render_video(
                 mean_np=mean_np,
                 std_np=std_np,
                 frames=frames,
+                traj_mask=traj_mask,
             )
         except Exception as e:
             print(f"Error rendering {npy_file}: {e}")
@@ -96,66 +105,6 @@ def render_video(
 
     print(
         f"{motion_count} motion clips rendered. {error_count} errors. Saved to {save_dir}"
-    )
-
-
-def render_root_trajectory_only_video(
-    motion_dir: str,
-    save_dir: str,
-    render_setting: dict,
-    mask_dir: str = None,
-    output_suffix: str = "",
-):
-    """
-    Render only root (x,y,z) trajectory from saved 263D motion features.
-
-    Args:
-        motion_dir: folder containing "*.npy" feature files shaped (T, 263).
-        save_dir: output folder for mp4 files.
-        render_setting: config dict, uses "fps" if provided.
-        mask_dir: optional folder containing "*.npy" masks shaped (T,) to hide invalid points.
-                   Naming convention: mask file shares the same stem as motion file.
-    """
-    os.makedirs(save_dir, exist_ok=True)
-    motion_path = Path(motion_dir)
-    npy_files = list(motion_path.glob("*.npy"))
-
-    fps = int(render_setting.get("fps", 20))
-    radius = float(render_setting.get("traj_radius", 0.01))
-
-    motion_count = 0
-    error_count = 0
-
-    for npy_file in tqdm(npy_files, desc="Rendering root trajectories"):
-        feature = np.load(npy_file)
-        output_filename = npy_file.stem + output_suffix + ".mp4"
-        output_path = os.path.join(save_dir, output_filename)
-
-        # Optional mask (T,)
-        mask = None
-        if mask_dir is not None and os.path.exists(mask_dir):
-            mask_path = os.path.join(mask_dir, npy_file.name)
-            if os.path.exists(mask_path):
-                mask = np.load(mask_path)
-
-        try:
-            # feature is (T, 263)
-            root_traj = extract_root_trajectory_263(feature)
-            render_root_trajectory_video(
-                traj=root_traj,
-                out_path=output_path,
-                fps=fps,
-                mask=mask,
-                radius=radius,
-            )
-            motion_count += 1
-        except Exception as e:
-            print(f"Error rendering root trajectory {npy_file}: {e}")
-            error_count += 1
-            continue
-
-    print(
-        f"{motion_count} root trajectories rendered. {error_count} errors. Saved to {save_dir}"
     )
 
 

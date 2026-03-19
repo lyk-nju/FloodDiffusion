@@ -428,7 +428,13 @@ def render_root_trajectory_video(
 
 
 def render_simple_skeleton_video(
-    data, chains, out_path="results_ultra.mp4", fps=20, frames: np.ndarray = None
+    data,
+    chains,
+    out_path="results_ultra.mp4",
+    fps=20,
+    frames: np.ndarray = None,
+    traj_mask: np.ndarray = None,
+    traj_mask_point_radius: int = 4,
 ):
     traj = data[:, 0, [0, 2]]  # root joint XZ trajectory
 
@@ -599,17 +605,33 @@ def render_simple_skeleton_video(
     # Prepare video writer
     writer = imageio.get_writer(out_path, fps=fps)
 
+    # Normalize/validate traj_mask once
+    if traj_mask is not None:
+        traj_mask = np.asarray(traj_mask).reshape(-1).astype(np.float32)
+        # Align length to trajectory length (data frames)
+        if traj_mask.shape[0] < len(traj):
+            pad = np.zeros((len(traj) - traj_mask.shape[0],), dtype=np.float32)
+            traj_mask = np.concatenate([traj_mask, pad], axis=0)
+        elif traj_mask.shape[0] > len(traj):
+            traj_mask = traj_mask[: len(traj)]
+        # treat NaN as 0
+        traj_mask = np.nan_to_num(traj_mask, nan=0.0, posinf=0.0, neginf=0.0)
+
     for frame in range(len(data)):
         img = np.ones((height, width, 3), dtype=np.uint8) * 255
         joints = data[frame]
-        if frame > 0:
-            for i in range(frame):
-                if i + 1 < len(traj):
-                    p1 = world_to_screen([traj[i, 0], 0, traj[i, 1]])
-                    p2 = world_to_screen([traj[i + 1, 0], 0, traj[i + 1, 1]])
-                    draw_line_vectorized(
-                        img, p1, p2, [255, 0, 0], thickness=3
-                    )  # Red trajectory
+        # Masked trajectory overlay (points only)
+        if traj_mask is not None:
+            visible_idx = np.where(traj_mask[: frame + 1] > 0.0)[0]
+            # points
+            for j in visible_idx:
+                center = world_to_screen([traj[j, 0], 0, traj[j, 1]])
+                draw_circle_vectorized(
+                    img,
+                    center,
+                    int(traj_mask_point_radius),
+                    [0, 0, 255],
+                )
         # Draw bones with palette cycling per segment
         color_index = 0
         for chain in chains:

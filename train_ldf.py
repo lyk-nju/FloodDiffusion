@@ -26,7 +26,6 @@ from utils.lightning_module import BasicLightningModule
 from utils.visualize import (  # evaluate_video
     make_composite_compare_videos,
     render_video,
-    render_root_trajectory_only_video,
 )
 
 # Set tokenizers parallelism to false to avoid warnings in multiprocessing
@@ -321,6 +320,7 @@ class CustomLightningModule(BasicLightningModule):
                     save_dir=f"{self.cfg.save_dir}/{dataset_id}/video",
                     render_setting=self.cfg.test_setting,
                     frames_dir=f"{self.cfg.save_dir}/{dataset_id}/frames",
+                    traj_mask_dir=f"{self.cfg.save_dir}/{dataset_id}/traj_mask",
                 )
 
                 # Create composite videos
@@ -335,18 +335,6 @@ class CustomLightningModule(BasicLightningModule):
                     text_folder=f"{self.cfg.save_dir}/{dataset_id}/text",
                     save_dir=f"{self.cfg.save_dir}/{dataset_id}/composite",
                 )
-
-                # Additionally render masked root trajectory points as separate videos
-                # (avoid overwriting skeleton videos by using a filename suffix).
-                traj_mask_dir = f"{self.cfg.save_dir}/{dataset_id}/traj_mask"
-                if os.path.exists(traj_mask_dir):
-                    render_root_trajectory_only_video(
-                        motion_dir=feature_dir,
-                        save_dir=f"{self.cfg.save_dir}/{dataset_id}/video",
-                        render_setting=self.cfg.test_setting,
-                        mask_dir=traj_mask_dir,
-                        output_suffix="_roottraj_mask",
-                    )
 
                 # wandb log video
                 if (
