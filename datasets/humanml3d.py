@@ -182,7 +182,13 @@ class HumanML3DDataset(Dataset):
             traj = extract_root_trajectory_263(feature)
             output["traj"] = traj
             output["traj_length"] = len(traj)
-            output["traj_mask"] = np.ones(len(traj), dtype=np.float32)
+            # Sparse keypoint observation: keep ~20-30% frames.
+            # Mask is used by control loss to only supervise on observed frames.
+            traj_mask = np.zeros(len(traj), dtype=np.float32)
+            n_keep = max(1, int(len(traj) * random.uniform(0.2, 0.3)))
+            indices = random.sample(range(len(traj)), n_keep)
+            traj_mask[indices] = 1.0
+            output["traj_mask"] = traj_mask
         ##############################
         # token
         ##############################

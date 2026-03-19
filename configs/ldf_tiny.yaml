@@ -4,7 +4,7 @@ debug: false
 train: true
 
 save_dir: ./outputs
-resume_ckpt: "${dirs.outputs}/20260317_203006_ldf_tiny/step_step=72000.ckpt"
+resume_ckpt: "${dirs.outputs}/20260317_203006_ldf_tiny/step_step=60000.ckpt"
 test_ckpt: "${dirs.outputs}/20251217_023720_ldf_tiny/step_step=60000.ckpt"
 test_vae_ckpt: "${dirs.outputs}/vae_1d_z4_step=300000.ckpt"
 test_vae:
@@ -33,7 +33,7 @@ logger:
 trainer: # lightning trainer
     max_steps: 80000
     accelerator: gpu
-    devices: [0,1,2,3]
+    devices: [0,1,2,3,4]
     log_every_n_steps: 100
     precision: bf16-mixed
 validation:
