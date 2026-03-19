@@ -26,6 +26,7 @@ from utils.lightning_module import BasicLightningModule
 from utils.visualize import (  # evaluate_video
     make_composite_compare_videos,
     render_video,
+    render_root_trajectory_only_video,
 )
 
 # Set tokenizers parallelism to false to avoid warnings in multiprocessing
@@ -276,6 +277,22 @@ class CustomLightningModule(BasicLightningModule):
                     f"{self.cfg.save_dir}/{single_dataset_id}/feature/{single_generated_id}.npy",
                     decoded_single_generated.float().cpu().numpy(),
                 )
+
+                # Save traj_mask (if provided by dataset) so we can mask the root trajectory in visualization.
+                if "traj_mask" in batch:
+                    L_feat = int(decoded_single_generated.shape[0])
+                    traj_mask_i = batch["traj_mask"][i]
+                    if torch.is_tensor(traj_mask_i):
+                        traj_mask_i = traj_mask_i.detach().cpu().numpy()
+                    traj_mask_i = np.asarray(traj_mask_i).reshape(-1)[:L_feat]
+                    os.makedirs(
+                        f"{self.cfg.save_dir}/{single_dataset_id}/traj_mask",
+                        exist_ok=True,
+                    )
+                    np.save(
+                        f"{self.cfg.save_dir}/{single_dataset_id}/traj_mask/{single_generated_id}.npy",
+                        traj_mask_i,
+                    )
                 # Save text_end if available
                 if frames is not None:
                     os.makedirs(
@@ -318,6 +335,18 @@ class CustomLightningModule(BasicLightningModule):
                     text_folder=f"{self.cfg.save_dir}/{dataset_id}/text",
                     save_dir=f"{self.cfg.save_dir}/{dataset_id}/composite",
                 )
+
+                # Additionally render masked root trajectory points as separate videos
+                # (avoid overwriting skeleton videos by using a filename suffix).
+                traj_mask_dir = f"{self.cfg.save_dir}/{dataset_id}/traj_mask"
+                if os.path.exists(traj_mask_dir):
+                    render_root_trajectory_only_video(
+                        motion_dir=feature_dir,
+                        save_dir=f"{self.cfg.save_dir}/{dataset_id}/video",
+                        render_setting=self.cfg.test_setting,
+                        mask_dir=traj_mask_dir,
+                        output_suffix="_roottraj_mask",
+                    )
 
                 # wandb log video
                 if (

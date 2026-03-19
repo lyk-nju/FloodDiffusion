@@ -4,7 +4,7 @@ debug: false
 train: true
 
 save_dir: ./outputs
-resume_ckpt: "${dirs.outputs}/20251217_023720_ldf_tiny/step_step=60000.ckpt"
+resume_ckpt: "${dirs.outputs}/20260317_203006_ldf_tiny/step_step=72000.ckpt"
 test_ckpt: "${dirs.outputs}/20251217_023720_ldf_tiny/step_step=60000.ckpt"
 test_vae_ckpt: "${dirs.outputs}/vae_1d_z4_step=300000.ckpt"
 test_vae:
@@ -31,10 +31,9 @@ logger:
         entity: "${wandb_info.entity}"
 
 trainer: # lightning trainer
-    max_steps: 300000
+    max_steps: 80000
     accelerator: gpu
-    devices: [0,1,2,3,4]
-    accumulate_grad_batches: 8  # effective bs = 8 * 8 = 64
+    devices: [0,1,2,3]
     log_every_n_steps: 100
     precision: bf16-mixed
 validation:
@@ -124,7 +123,7 @@ model:
         use_traj_cond: true
         traj_out_dim: 2
         traj_drop_out: 0.1
-        control_loss_weight: 1.0
+        control_loss_weight: 0.3
         freeze_backbone_for_traj: true  # 只微调轨迹分支（文本 & 主干冻结）
 
 optimizer:

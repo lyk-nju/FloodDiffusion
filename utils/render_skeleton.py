@@ -298,6 +298,135 @@ def render_skeleton_video(data, chains, out_path, fps=20, frames: np.ndarray = N
     renderer.delete()
 
 
+def render_root_trajectory_video(
+    traj: np.ndarray,
+    out_path: str,
+    fps: int = 20,
+    mask: np.ndarray = None,
+    radius: float = 0.01,
+    color=(0.0, 0.0, 1.0, 1.0),
+):
+    """
+    Render only root trajectory as a video (no skeleton).
+
+    Args:
+        traj: (T, 3) world-space (x, y, z) or (T, 2) (x, z).
+        out_path: mp4 output path.
+        fps: video fps.
+        mask: optional (T,) array; points with mask==0 will be hidden.
+        radius: sphere radius for trajectory points.
+        color: trajectory color (RGBA, 0-1).
+    """
+    if traj.ndim != 2 or traj.shape[0] < 1:
+        raise ValueError(f"traj must be (T,2) or (T,3), got shape={traj.shape}")
+
+    if traj.shape[1] == 3:
+        traj_xz = traj[:, [0, 2]]
+        y_for_height = traj[:, 1]
+    elif traj.shape[1] == 2:
+        traj_xz = traj
+        y_for_height = np.zeros((traj_xz.shape[0],), dtype=np.float32)
+    else:
+        raise ValueError(f"traj must have 2 or 3 columns, got shape={traj.shape}")
+
+    if mask is not None:
+        mask = np.asarray(mask).astype(np.float32)
+        if mask.shape[0] != traj_xz.shape[0]:
+            raise ValueError(f"mask length {mask.shape[0]} != traj length {traj_xz.shape[0]}")
+
+    # Choose a camera height based on trajectory y-range (fallback if flat)
+    sk_height = float(np.ptp(y_for_height))
+    if sk_height < 1e-6:
+        sk_height = 1.5
+
+    # Setup scene
+    scene = pyrender.Scene(
+        bg_color=[1.0, 1.0, 1.0, 1.0],
+        ambient_light=[0.5, 0.5, 0.5],
+    )
+
+    main_light = pyrender.DirectionalLight(
+        color=[1.0, 1.0, 1.0],
+        intensity=3.0,
+    )
+    main_light_pose = np.array(
+        [
+            [1, 0, 0, 0],
+            [0, 0.8, -0.6, 0],
+            [0, 0.6, 0.6, 0],
+            [0, 0, 0, 1],
+        ]
+    )
+    scene.add(main_light, pose=main_light_pose)
+
+    fill_light = pyrender.DirectionalLight(
+        color=[0.8, 0.8, 0.8],
+        intensity=2.0,
+    )
+    fill_light_pose = np.array(
+        [
+            [1, 0, 0, 0],
+            [0, 0.6, 0.8, 0],
+            [0, -0.8, 0.6, 0],
+            [0, 0, 0, 1],
+        ]
+    )
+    scene.add(fill_light, pose=fill_light_pose)
+
+    # Ground
+    ground = create_ground_plane(traj_xz)
+    ground_material = pyrender.MetallicRoughnessMaterial(
+        baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+        metallicFactor=0.0,
+        roughnessFactor=0.8,
+    )
+    ground_mesh = pyrender.Mesh.from_trimesh(ground, material=ground_material, smooth=True)
+    scene.add(ground_mesh)
+
+    # Initial trajectory node (empty)
+    traj_mesh = create_trajectory_mesh(np.zeros((0, 3)), radius=radius, color=list(color))
+    traj_node = scene.add(pyrender.Mesh.from_trimesh(traj_mesh, smooth=False))
+
+    # Initialize camera (use first point)
+    first_x, first_z = float(traj_xz[0, 0]), float(traj_xz[0, 1])
+    cam_node = setup_camera(scene, sk_height, first_x, first_z)
+
+    renderer = pyrender.OffscreenRenderer(800, 800)
+    writer = imageio.get_writer(out_path, fps=fps)
+
+    T = traj_xz.shape[0]
+    for i in range(T):
+        # Update camera to follow the current step
+        update_camera(scene, cam_node, sk_height, float(traj_xz[i, 0]), float(traj_xz[i, 1]))
+
+        # Build points up to i, optionally filtered by mask
+        if mask is None:
+            visible_idx = np.arange(i + 1)
+        else:
+            visible_idx = np.where(mask[: i + 1] > 0.0)[0]
+
+        if visible_idx.size == 0:
+            pts3 = np.zeros((0, 3), dtype=np.float32)
+        else:
+            pts3 = np.column_stack(
+                [
+                    traj_xz[visible_idx, 0],
+                    np.zeros((visible_idx.size,), dtype=np.float32),
+                    traj_xz[visible_idx, 1],
+                ]
+            ).astype(np.float32)
+
+        scene.remove_node(traj_node)
+        traj_mesh = create_trajectory_mesh(pts3, radius=radius, color=list(color))
+        traj_node = scene.add(pyrender.Mesh.from_trimesh(traj_mesh, smooth=False))
+
+        color_img, _ = renderer.render(scene, flags=pyrender.RenderFlags.SHADOWS_DIRECTIONAL)
+        writer.append_data(color_img)
+
+    writer.close()
+    renderer.delete()
+
+
 def render_simple_skeleton_video(
     data, chains, out_path="results_ultra.mp4", fps=20, frames: np.ndarray = None
 ):
