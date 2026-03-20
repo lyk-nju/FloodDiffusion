@@ -2,7 +2,10 @@
 Flask server for real-time 3D motion generation demo
 """
 from flask import Flask, render_template, jsonify, request
-from flask_cors import CORS
+try:
+    from flask_cors import CORS
+except ModuleNotFoundError:
+    CORS = None
 import json
 import time
 import threading
@@ -12,7 +15,10 @@ from omegaconf import OmegaConf
 from model_manager import get_model_manager
 
 app = Flask(__name__)
-CORS(app)
+if CORS is not None:
+    CORS(app)
+else:
+    print("[web_demo] Warning: flask_cors not installed; skipping CORS setup.")
 
 # Global model manager (lazy loaded)
 model_manager = None

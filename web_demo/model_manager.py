@@ -285,6 +285,17 @@ class ModelManager:
             waypoints = waypoints.reshape(1, -1)
         if waypoints.shape[1] == 2:
             waypoints = np.c_[waypoints[:, 0], np.zeros(len(waypoints)), waypoints[:, 1]]
+
+        # IMPORTANT:
+        # In training, the root trajectory XZ is treated as an offset relative to the first frame
+        # (i.e., the first frame is effectively at XZ=0). Therefore we must convert user-provided
+        # absolute XZ coordinates into relative offsets before passing to the model.
+        waypoints = waypoints.astype(np.float64, copy=False)
+        waypoints_rel = waypoints.copy()
+        waypoints_rel[:, 0] = waypoints_rel[:, 0] - waypoints_rel[0, 0]
+        waypoints_rel[:, 2] = waypoints_rel[:, 2] - waypoints_rel[0, 2]
+        waypoints = waypoints_rel
+
         n = len(waypoints)
         indices = np.linspace(0, n - 1, self.TRAJ_INTERP_LENGTH, dtype=np.float64)
         self.current_traj_array = np.stack([

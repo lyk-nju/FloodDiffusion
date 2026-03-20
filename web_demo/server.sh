@@ -3,7 +3,7 @@
 
 PID_FILE="server.pid"
 LOG_FILE="app.log"
-CONFIG_FILE="${2:-../configs/stream.yaml}"
+CONFIG_FILE="${2:-./configs/stream_tiny.yaml}"
 PORT="${PORT:-5000}"
 DEMO_CONFIG_FILE="${DEMO_CONFIG_FILE:-configs/traj_mask.yaml}"
 
@@ -60,6 +60,8 @@ case "$1" in
             curl -s "http://localhost:${PORT}/api/status"
         else
             echo "Failed to start server"
+            echo "--- app.log (last 60 lines) ---"
+            tail -n 60 "$LOG_FILE" 2>/dev/null || true
             rm -f "$PID_FILE"
             exit 1
         fi
@@ -117,8 +119,9 @@ case "$1" in
         echo "  status               - Check server status"
         echo ""
         echo "Examples:"
-        echo "  $0 start                           # Use default config (configs/stream.yaml)"
-        echo "  $0 start configs/stream_tiny.yaml  # Use custom config"
+        echo "  $0 start                           # Use default config (./configs/stream.yaml)"
+        echo "  $0 start ../configs/stream_tiny.yaml  # Use custom config"
+        echo "  DEMO_CONFIG_FILE=configs/traj_mask.yaml $0 start ../configs/stream_tiny.yaml"
         echo "  $0 restart configs/stream_tiny.yaml  # Restart with custom config"
         exit 1
         ;;
