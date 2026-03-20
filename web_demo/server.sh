@@ -3,8 +3,9 @@
 
 PID_FILE="server.pid"
 LOG_FILE="app.log"
-CONFIG_FILE="${2:-configs/stream.yaml}"
+CONFIG_FILE="${2:-../configs/stream.yaml}"
 PORT="${PORT:-5000}"
+DEMO_CONFIG_FILE="${DEMO_CONFIG_FILE:-configs/traj_mask.yaml}"
 
 # Allow overriding GPU via env, otherwise keep user's setting.
 # (Do not hardcode a single GPU index here.)
@@ -50,7 +51,7 @@ case "$1" in
         # Run from web_demo/ so relative paths work as expected.
         SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
         cd "$SCRIPT_DIR" || exit 1
-        nohup "$PY_BIN" app.py --config "$CONFIG_FILE" --port "$PORT" > "$LOG_FILE" 2>&1 &
+        nohup "$PY_BIN" app.py --config "$CONFIG_FILE" --demo-config "$DEMO_CONFIG_FILE" --port "$PORT" > "$LOG_FILE" 2>&1 &
         echo $! > "$PID_FILE"
         sleep 3
         
@@ -94,7 +95,7 @@ case "$1" in
             PID=$(cat "$PID_FILE")
             if ps -p $PID > /dev/null 2>&1; then
                 echo "Server is running (PID: $PID)"
-                curl -s http://localhost:5000/api/status
+                curl -s "http://localhost:${PORT}/api/status"
             else
                 echo "PID file exists but process is not running"
                 rm -f "$PID_FILE"

@@ -7,6 +7,8 @@ import json
 import time
 import threading
 import argparse
+import os
+from omegaconf import OmegaConf
 from model_manager import get_model_manager
 
 app = Flask(__name__)
@@ -15,6 +17,8 @@ CORS(app)
 # Global model manager (lazy loaded)
 model_manager = None
 model_config_path = None  # Will be set once at startup
+demo_config_path = None  # Will be set once at startup
+traj_mask_cfg = None
 
 # Session tracking - only one active session can generate at a time
 active_session_id = None  # The session ID currently generating
@@ -29,14 +33,38 @@ consumption_monitor_lock = threading.Lock()
 
 def init_model():
     """Initialize model manager"""
-    global model_manager
+    global model_manager, traj_mask_cfg
     if model_manager is None:
         if model_config_path is None:
             raise RuntimeError("model_config_path not set. Server not properly initialized.")
         print(f"Initializing model manager with config: {model_config_path}")
-        model_manager = get_model_manager(config_path=model_config_path)
+        model_manager = get_model_manager(
+            config_path=model_config_path,
+            traj_mask_cfg=traj_mask_cfg,
+        )
         print("Model manager ready!")
     return model_manager
+
+
+def load_traj_mask_cfg(path: str):
+    """
+    Load trajectory mask config.
+    Expected format:
+      traj_mask:
+        enabled: bool
+        keep_ratio_min: float
+        keep_ratio_max: float
+        keep_first_last: bool
+    """
+    if not path:
+        return {}
+    if not os.path.exists(path):
+        print(f"Traj mask config not found: {path}. Using defaults (disabled or default ratios).")
+        return {}
+    cfg = OmegaConf.load(path)
+    if "traj_mask" in cfg:
+        return OmegaConf.to_container(cfg.traj_mask, resolve=True)
+    return OmegaConf.to_container(cfg, resolve=True)
 
 
 def consumption_monitor():
@@ -491,15 +519,20 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Flask server for real-time 3D motion generation')
     parser.add_argument('--config', type=str, default='configs/stream.yaml',
                         help='Path to config yaml file (default: configs/stream.yaml)')
+    parser.add_argument('--demo-config', type=str, default='configs/traj_mask.yaml',
+                        help='Path to web_demo config yaml (trajectory mask config)')
     parser.add_argument('--port', type=int, default=5000,
                         help='Port to run the server on (default: 5000)')
     args = parser.parse_args()
     
     # Set config path (this is module-level code, no need for global declaration)
     model_config_path = args.config
+    demo_config_path = args.demo_config
+    traj_mask_cfg = load_traj_mask_cfg(demo_config_path)
     
     print("Starting Flask server...")
     print(f"Config file: {model_config_path}")
+    print(f"Demo config file: {demo_config_path}")
     print("Note: Model will be loaded on first generation request")
     app.run(host='0.0.0.0', port=args.port, debug=False, threaded=True)
 

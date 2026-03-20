@@ -32,6 +32,18 @@ class MotionApp {
         this.autoFollowDelay = 2000; // Auto-follow after 2 seconds of inactivity (reduced from 3s)
         this.currentRootPos = new THREE.Vector3(0, 1, 0);
 
+        // Trajectory drawing (mouse drag on ground)
+        this.initialTaskY = 1.0; // Used as y for xz-only trajectory points.
+        this.taskYCaptured = false; // Capture initial root y on first frame after start.
+        this.isDrawingTrajectory = false;
+        this.drawnWaypoints = []; // Array of [x, y, z]
+        this.drawnWaypointMinDist = 0.05; // Avoid duplicate points while dragging.
+        this.trajPointSpheres = [];
+        this.trajectoryPushThrottleMs = 120;
+        this.lastTrajectoryPushTime = 0;
+        this.trajectoryPushInFlight = false;
+        this.pendingTrajectoryPush = false;
+
         this.initThreeJS();
         this.initUI();
         this.updateStatus();
@@ -145,6 +157,32 @@ class MotionApp {
         this.controls.enableDamping = true;
         this.controls.dampingFactor = 0.05;
         this.controls.update();
+
+        // Raycast helpers to map mouse position to ground (XZ plane)
+        this.raycaster = new THREE.Raycaster();
+        this.ndcMouse = new THREE.Vector2();
+        // Match the demo's "ground" concept for trajectory selection.
+        // (We project to y=0; the y used for trajectory points comes from `initialTaskY`.)
+        this.groundSelectionPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+        // Visualize drawn trajectory points (small spheres)
+        this.trajPointsGroup = new THREE.Group();
+        this.scene.add(this.trajPointsGroup);
+        const trajPointGeometry = new THREE.SphereGeometry(0.04, 14, 14);
+        const trajPointMaterial = new THREE.MeshStandardMaterial({
+            color: 0xff3b30,
+            metalness: 0.2,
+            roughness: 0.4,
+            emissive: 0x330000
+        });
+        this.trajPointGeometry = trajPointGeometry;
+        this.trajPointMaterial = trajPointMaterial;
+
+        // Canvas pointer interactions: drag on ground to create waypoints
+        canvas.addEventListener('pointerdown', (e) => this.onCanvasPointerDown(e));
+        canvas.addEventListener('pointermove', (e) => this.onCanvasPointerMove(e));
+        canvas.addEventListener('pointerup', (e) => this.onCanvasPointerUp(e));
+        canvas.addEventListener('pointercancel', (e) => this.onCanvasPointerUp(e));
 
         // Listen for user interaction - record time
         const updateInteractionTime = () => {
@@ -271,6 +309,9 @@ class MotionApp {
                 this.isRunning = true;
                 this.isPaused = false;
                 this.isIdle = false;
+                // Reset "initial task y" capture; it will be updated after first frame.
+                this.taskYCaptured = false;
+                this.initialTaskY = this.currentRootPos.y;
                 this.frameCount = 0;
                 this.motionFrameCount = 0;
                 this.motionFpsCounter = 0;
@@ -285,6 +326,15 @@ class MotionApp {
                 this.pauseResumeBtn.textContent = 'Pause';
                 this.statusEl.textContent = 'Running';
                 this.startFrameLoop();
+
+                // If there's trajectory in textarea (or from drag), apply it immediately after start.
+                // Otherwise users need to click "Update Trajectory" manually.
+                const initTraj = this.parseWaypointsFromTextarea();
+                if (initTraj && initTraj.length > 0) {
+                    this.drawnWaypoints = initTraj;
+                    this.syncTrajectorySpheresFromWaypoints();
+                    this.pushTrajectoryToBackend(initTraj, true);
+                }
             } else if (response.status === 409 && data.conflict) {
                 // Another session is running, show warning UI
                 this.statusEl.textContent = 'Conflict - Another user is generating';
@@ -367,7 +417,7 @@ class MotionApp {
                 points.push(
                     parts.length >= 3
                         ? [parts[0], parts[1], parts[2]]
-                        : [parts[0], 0, parts[1]]
+                        : [parts[0], this.initialTaskY ?? 0, parts[1]]
                 );
             }
         }
@@ -391,6 +441,8 @@ class MotionApp {
             const data = await response.json();
             if (data.status === 'success') {
                 console.log('Trajectory updated:', waypoints.length, 'waypoints');
+                this.drawnWaypoints = waypoints;
+                this.syncTrajectorySpheresFromWaypoints();
             } else {
                 alert('Error: ' + (data.message || 'Failed to update trajectory'));
             }
@@ -413,7 +465,8 @@ class MotionApp {
             });
             const data = await response.json();
             if (data.status === 'success') {
-                if (this.trajectoryWaypoints) this.trajectoryWaypoints.value = '';
+                this.clearDrawnTrajectoryUI();
+                this.drawnWaypoints = [];
                 console.log('Trajectory cleared');
             }
         } catch (e) {
@@ -540,6 +593,9 @@ class MotionApp {
                     this.skeleton.clearTrail();
                 }
 
+                // Clear drawn trajectory points (mouse-drawn)
+                this.clearDrawnTrajectoryUI();
+
                 console.log('Reset complete - all state cleared');
             }
         } catch (error) {
@@ -614,6 +670,12 @@ class MotionApp {
                             data.joints[0][2]
                         );
 
+                        // Capture "initial task y" once after generation starts.
+                        if (!this.taskYCaptured) {
+                            this.initialTaskY = this.currentRootPos.y;
+                            this.taskYCaptured = true;
+                        }
+
                         // Auto-follow (if user hasn't interacted for a while)
                         this.updateAutoFollow();
 
@@ -669,6 +731,158 @@ class MotionApp {
 
             // Debug log (comment out in production)
             // console.log('Auto-follow active, tracking:', newTarget);
+        }
+    }
+
+    getGroundPointFromEvent(e) {
+        // Project pointer to NDC and raycast onto a y=0 plane.
+        // Returned y is NOT the intersection y; it uses `initialTaskY` (for xz-only trajectory input).
+        if (!this.renderer || !this.camera || !this.raycaster || !this.groundSelectionPlane) return null;
+
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        const ndcY = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+
+        this.ndcMouse.set(ndcX, ndcY);
+        this.raycaster.setFromCamera(this.ndcMouse, this.camera);
+
+        const hitPoint = new THREE.Vector3();
+        const hit = this.raycaster.ray.intersectPlane(this.groundSelectionPlane, hitPoint);
+        if (!hit) return null;
+
+        return [hitPoint.x, this.initialTaskY, hitPoint.z];
+    }
+
+    clearTrajectorySpheres() {
+        if (!this.trajPointsGroup) return;
+        for (const mesh of this.trajPointSpheres) {
+            this.trajPointsGroup.remove(mesh);
+        }
+        this.trajPointSpheres = [];
+    }
+
+    syncTrajectorySpheresFromWaypoints(waypoints) {
+        this.clearTrajectorySpheres();
+        if (!waypoints || waypoints.length === 0) return;
+
+        for (const p of waypoints) {
+            const mesh = new THREE.Mesh(this.trajPointGeometry, this.trajPointMaterial);
+            mesh.position.set(p[0], p[1], p[2]);
+            this.trajPointsGroup.add(mesh);
+            this.trajPointSpheres.push(mesh);
+        }
+    }
+
+    syncTextareaFromWaypoints(waypoints) {
+        if (!this.trajectoryWaypoints) return;
+        if (!waypoints || waypoints.length === 0) {
+            this.trajectoryWaypoints.value = '';
+            return;
+        }
+        // Display as x z only; y will be filled during parsing using `initialTaskY`.
+        this.trajectoryWaypoints.value = waypoints
+            .map((p) => `${Number(p[0]).toFixed(3)} ${Number(p[2]).toFixed(3)}`)
+            .join('\n');
+    }
+
+    async pushTrajectoryToBackend(waypoints, force = false) {
+        if (this.isIdle) return;
+
+        const now = performance.now();
+        if (!force && now - this.lastTrajectoryPushTime < this.trajectoryPushThrottleMs) return;
+
+        if (this.trajectoryPushInFlight) {
+            this.pendingTrajectoryPush = true;
+            return;
+        }
+
+        this.trajectoryPushInFlight = true;
+        this.lastTrajectoryPushTime = now;
+        try {
+            await fetch('/api/update_trajectory', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: this.sessionId,
+                    waypoints: waypoints && waypoints.length > 0 ? waypoints : null
+                })
+            });
+        } catch (err) {
+            console.error('pushTrajectoryToBackend failed:', err);
+        } finally {
+            this.trajectoryPushInFlight = false;
+            if (this.pendingTrajectoryPush) {
+                this.pendingTrajectoryPush = false;
+                this.pushTrajectoryToBackend(this.drawnWaypoints, true);
+            }
+        }
+    }
+
+    clearDrawnTrajectoryUI() {
+        this.drawnWaypoints = [];
+        this.syncTextareaFromWaypoints([]);
+        this.clearTrajectorySpheres();
+    }
+
+    addWaypointFromPoint(xyz) {
+        if (!xyz) return false;
+        const last = this.drawnWaypoints.length > 0 ? this.drawnWaypoints[this.drawnWaypoints.length - 1] : null;
+        if (last) {
+            const dx = xyz[0] - last[0];
+            const dz = xyz[2] - last[2];
+            const dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist < this.drawnWaypointMinDist) return false;
+        }
+        this.drawnWaypoints.push(xyz);
+        return true;
+    }
+
+    onCanvasPointerDown(e) {
+        if (e.button !== 0) return;
+        if (!this.controls) return;
+
+        this.controls.enabled = false;
+        this.isDrawingTrajectory = true;
+
+        // Start a new stroke.
+        this.drawnWaypoints = [];
+        this.pendingTrajectoryPush = false;
+        this.trajectoryPushInFlight = false;
+        this.clearTrajectorySpheres();
+        this.syncTextareaFromWaypoints([]);
+
+        const p = this.getGroundPointFromEvent(e);
+        const added = this.addWaypointFromPoint(p);
+        if (added) {
+            this.syncTextareaFromWaypoints(this.drawnWaypoints);
+            this.syncTrajectorySpheresFromWaypoints(this.drawnWaypoints);
+            this.pushTrajectoryToBackend(this.drawnWaypoints, true);
+        }
+
+        this.lastUserInteraction = Date.now();
+    }
+
+    onCanvasPointerMove(e) {
+        if (!this.isDrawingTrajectory) return;
+        const p = this.getGroundPointFromEvent(e);
+        const added = this.addWaypointFromPoint(p);
+        if (!added) return;
+
+        // Keep UI responsive; backend updates are throttled.
+        this.syncTextareaFromWaypoints(this.drawnWaypoints);
+        this.syncTrajectorySpheresFromWaypoints(this.drawnWaypoints);
+        this.pushTrajectoryToBackend(this.drawnWaypoints, false);
+
+        this.lastUserInteraction = Date.now();
+    }
+
+    onCanvasPointerUp(_e) {
+        if (!this.isDrawingTrajectory) return;
+        this.isDrawingTrajectory = false;
+        this.controls.enabled = true;
+
+        if (this.drawnWaypoints && this.drawnWaypoints.length > 0) {
+            this.pushTrajectoryToBackend(this.drawnWaypoints, true);
         }
     }
 

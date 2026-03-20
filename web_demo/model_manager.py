@@ -60,9 +60,18 @@ class ModelManager:
     Manages model loading and real-time frame generation.
     Trajectory control is active only when the loaded config has use_traj_cond=True.
     """
-    def __init__(self, config_path=None):
+    def __init__(self, config_path=None, traj_mask_cfg=None):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {self.device}")
+
+        traj_mask_cfg = traj_mask_cfg or {}
+        self.traj_mask_enabled = bool(traj_mask_cfg.get("enabled", True))
+        self.traj_mask_keep_ratio_min = float(traj_mask_cfg.get("keep_ratio_min", 0.2))
+        self.traj_mask_keep_ratio_max = float(traj_mask_cfg.get("keep_ratio_max", 0.3))
+        self.traj_mask_keep_first_last = bool(traj_mask_cfg.get("keep_first_last", True))
+        self.traj_mask_rng = np.random.default_rng()
+        self._last_traj_mask_keep = None
+        self._last_traj_mask_total = None
         
         # Load models
         self.vae, self.model = self._load_models(config_path)
@@ -92,6 +101,65 @@ class ModelManager:
         self.denoise_steps = 10  # Default denoising steps
         
         print("ModelManager initialized successfully")
+
+    def _sample_waypoint_mask(self, waypoint_len: int) -> np.ndarray:
+        """Sample traj_mask over user waypoints (length n), with keep ratio randomly sampled."""
+        if not self.traj_mask_enabled:
+            mask = np.ones((waypoint_len,), dtype=np.float32)
+            self._last_traj_mask_keep = int(mask.sum().item())
+            self._last_traj_mask_total = int(mask.shape[0])
+            return mask
+
+        if waypoint_len <= 0:
+            return np.zeros((0,), dtype=np.float32)
+        if waypoint_len == 1:
+            return np.ones((1,), dtype=np.float32)
+
+        keep_min = float(np.clip(self.traj_mask_keep_ratio_min, 0.0, 1.0))
+        keep_max = float(np.clip(self.traj_mask_keep_ratio_max, 0.0, 1.0))
+        if keep_min > keep_max:
+            keep_min, keep_max = keep_max, keep_min
+
+        keep_ratio = keep_min if keep_min == keep_max else float(self.traj_mask_rng.uniform(keep_min, keep_max))
+        keep_n = int(np.round(waypoint_len * keep_ratio))
+        keep_n = int(np.clip(keep_n, 1, waypoint_len))
+
+        mask = np.zeros((waypoint_len,), dtype=np.float32)
+        if self.traj_mask_keep_first_last and waypoint_len >= 2:
+            # Always keep endpoints.
+            keep_n_endpoints = 2
+            if keep_n <= keep_n_endpoints:
+                mask[0] = 1.0
+                mask[waypoint_len - 1] = 1.0
+            else:
+                remaining = keep_n - keep_n_endpoints
+                if remaining > 0 and waypoint_len > 2:
+                    mid_idx = np.arange(1, waypoint_len - 1, dtype=np.int64)
+                    chosen = self.traj_mask_rng.choice(
+                        mid_idx,
+                        size=min(remaining, len(mid_idx)),
+                        replace=False,
+                    )
+                    keep_idx = np.sort(
+                        np.concatenate(
+                            [np.array([0, waypoint_len - 1], dtype=np.int64), chosen.astype(np.int64)]
+                        )
+                    )
+                    mask[keep_idx] = 1.0
+                else:
+                    mask[0] = 1.0
+                    mask[waypoint_len - 1] = 1.0
+        else:
+            chosen = self.traj_mask_rng.choice(
+                np.arange(waypoint_len, dtype=np.int64),
+                size=keep_n,
+                replace=False,
+            )
+            mask[chosen] = 1.0
+
+        self._last_traj_mask_keep = int(mask.sum().item())
+        self._last_traj_mask_total = int(mask.shape[0])
+        return mask
     
     def _load_models(self, config_path):
         """Load VAE and diffusion models"""
@@ -224,8 +292,25 @@ class ModelManager:
             np.interp(indices, np.arange(n), waypoints[:, 1]),
             np.interp(indices, np.arange(n), waypoints[:, 2]),
         ], axis=1).astype(np.float32)
+
+        # Randomly mask user waypoints (train-time traj_mask behavior: traj = traj * traj_mask).
+        # Then map waypoint-level mask onto interpolated time steps via nearest neighbor.
+        waypoint_mask = self._sample_waypoint_mask(n)  # (n,)
+        interp_mask_idx = np.clip(np.round(indices).astype(np.int64), 0, n - 1)  # (TRAJ_INTERP_LENGTH,)
+        interp_mask = waypoint_mask[interp_mask_idx].astype(np.float32)  # (TRAJ_INTERP_LENGTH,)
+        self.current_traj_array = (self.current_traj_array * interp_mask[:, None].astype(np.float32))
+
         self.current_traj_waypoints = waypoints
-        print(f"Trajectory updated: {n} waypoints -> {len(self.current_traj_array)} interpolated points")
+        if self._last_traj_mask_keep is not None and self._last_traj_mask_total is not None:
+            masked_keep_steps = int(interp_mask.sum().item())
+            masked_total_steps = int(interp_mask.shape[0])
+            print(
+                f"Trajectory updated: {n} waypoints -> {len(self.current_traj_array)} time steps; "
+                f"keep (waypoints): {self._last_traj_mask_keep}/{self._last_traj_mask_total}, "
+                f"keep (time steps): {masked_keep_steps}/{masked_total_steps}"
+            )
+        else:
+            print(f"Trajectory updated: {n} waypoints -> {len(self.current_traj_array)} points")
     
     def pause_generation(self):
         """Pause generation (keeps all state)"""
@@ -384,12 +469,14 @@ class ModelManager:
 
 # Global model manager instance
 _model_manager = None
+_traj_mask_cfg = None
 
 
-def get_model_manager(config_path=None):
+def get_model_manager(config_path=None, traj_mask_cfg=None):
     """Get or create the global model manager instance"""
-    global _model_manager
+    global _model_manager, _traj_mask_cfg
     if _model_manager is None:
-        _model_manager = ModelManager(config_path)
+        _traj_mask_cfg = traj_mask_cfg or {}
+        _model_manager = ModelManager(config_path, traj_mask_cfg=_traj_mask_cfg)
     return _model_manager
 
