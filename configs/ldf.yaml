@@ -31,9 +31,9 @@ logger:
         entity: "${wandb_info.entity}"
 
 trainer: # lightning trainer
-    max_steps: 250000
+    max_steps: 300000
     accelerator: gpu
-    devices: [0,1,2,3,4]
+    devices: [3]
     log_every_n_steps: 100
     precision: bf16-mixed
 validation:
@@ -81,13 +81,13 @@ data:
     target: datasets.humanml3d.HumanML3DDataset
     collate_fn: datasets.humanml3d.collate_fn
     train_bs: 16
-    val_bs: 16
-    test_bs: 8
-    num_workers: 8
+    val_bs: 4
+    test_bs: 1
+    num_workers: 2
     train_meta_paths:
         - ${dirs.raw_data}/HumanML3D/train.txt
     val_meta_paths:
-        - ${dirs.raw_data}/HumanML3D/val_debug.txt
+        - ${dirs.raw_data}/HumanML3D/val.txt
         # - ${dirs.raw_data}/HumanML3D/test_min.txt
         # - ${dirs.raw_data}/HumanML3D/test.txt
     test_meta_paths:
@@ -117,7 +117,7 @@ model:
         traj_drop_out: 0.1
         traj_aggregate_mode: "last"   # 数据侧轨迹聚合策略（Task1/6 文档键）
         use_traj_emb_cache: true      # 推理流式 traj_emb 缓存（Task3）
-        control_loss_weight: 0.4  # MotionLCM-style explicit trajectory alignment
+        control_loss_weight: 0.2  # MotionLCM-style explicit trajectory alignment
         freeze_backbone_for_traj: true  # 只微调轨迹分支（文本 & 主干冻结）
 
 optimizer:

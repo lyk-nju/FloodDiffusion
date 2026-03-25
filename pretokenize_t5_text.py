@@ -103,7 +103,7 @@ def collect_unique_captions(cfg) -> Set[str]:
                         line = line.strip()
                         if not line:
                             continue
-                        cap = line.split("#", 1)[0]
+                        cap = line.split("#", 1)[0].strip()
                         captions.add(cap)
     captions.add("")
     return captions

@@ -12,6 +12,16 @@ from .tools.traj_encoder import TrajEncoder
 from .tools.wan_model import WanModel
 
 
+def _expand_precomputed_caption_keys(emb: dict) -> dict:
+    """Alias strip() keys so table matches HumanML3D captions after .strip()."""
+    out = dict(emb)
+    for k, v in emb.items():
+        s = k.strip()
+        if s not in out:
+            out[s] = v
+    return out
+
+
 class DiffForcingWanModel(nn.Module):
     def __init__(
         self,
@@ -95,7 +105,7 @@ class DiffForcingWanModel(nn.Module):
                     "(run pretokenize_t5_text.py to build the .pt)."
                 )
             blob = torch.load(precomputed_text_emb_path, map_location="cpu", weights_only=False)
-            self._precomputed_text_emb = blob["embeddings"]
+            self._precomputed_text_emb = _expand_precomputed_caption_keys(blob["embeddings"])
             if "" not in self._precomputed_text_emb:
                 raise KeyError(
                     'precomputed embeddings must include empty string key "" for CFG / dropout.'
@@ -174,13 +184,22 @@ class DiffForcingWanModel(nn.Module):
         """
         if self._precomputed_text_emb is not None:
             out = []
+            d = self._precomputed_text_emb
             for text in text_list:
-                if text not in self._precomputed_text_emb:
+                row = d.get(text)
+                if row is None:
+                    row = d.get(text.strip())
+                if row is None:
+                    preview = text.replace("\n", "\\n")
+                    if len(preview) > 160:
+                        preview = preview[:157] + "..."
                     raise KeyError(
-                        f"Caption not in precomputed T5 table (len={len(text)!r}). "
-                        f"Add it via pretokenize_t5_text.py or disable use_precomputed_text_emb."
+                        "Caption not in precomputed T5 table. "
+                        f"len={len(text)} preview={preview!r}. "
+                        "Re-run pretokenize_t5_text.py with the same config "
+                        "(include val/test meta paths), or set use_precomputed_text_emb=false."
                     )
-                out.append(self._precomputed_text_emb[text].to(device))
+                out.append(row.to(device))
             return out
 
         text_features = []

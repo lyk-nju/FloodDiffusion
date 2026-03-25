@@ -377,8 +377,8 @@ def main():
     torch.set_float32_matmul_precision("high")
     cfg = load_config()
     seed_everything(cfg.seed)
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
     run_time = get_shared_run_time(cfg.save_dir)
     save_dir = os.path.join(cfg.save_dir, f"{run_time}_{cfg.exp_name}")
     os.makedirs(save_dir, exist_ok=True)

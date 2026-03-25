@@ -141,7 +141,7 @@ class HumanML3DDataset(Dataset):
             for line in lines:
                 text_dict = {}
                 line_split = line.strip().split("#")
-                caption = line_split[0]
+                caption = line_split[0].strip()
                 t_tokens = line_split[1].split(" ")
                 f_tag = float(line_split[2])
                 to_tag = float(line_split[3])
