@@ -253,12 +253,29 @@ class DiffForcingWanModel(nn.Module):
         )
 
     def _get_traj_seq_lens(self, x, seq_len, device):
+        # Prefer explicit token-level mask length when provided.
+        if "traj_mask_token" in x and x["traj_mask_token"] is not None:
+            tm = x["traj_mask_token"]
+            if torch.is_tensor(tm):
+                # shape (B, T_token)
+                if tm.dim() == 1:
+                    tlen = torch.tensor([tm.numel()], device=device, dtype=torch.long)
+                else:
+                    tlen = torch.tensor([tm.size(1)] * tm.size(0), device=device, dtype=torch.long)
+            else:
+                # numpy array/list
+                tlen = torch.tensor([len(tm)], device=device, dtype=torch.long)
+            return tlen.clamp(min=0, max=seq_len)
+
+        # Backward compat: if someone still provides token-level traj_features_length.
         if "traj_features_length" in x and x["traj_features_length"] is not None:
-            return (
-                x["traj_features_length"]
-                .to(device=device, dtype=torch.long)
-                .clamp(min=0, max=seq_len)
-            )
+            tfl = x["traj_features_length"].to(device=device, dtype=torch.long)
+            # If traj_features is frame-level, convert to token length using factor 4.
+            if "traj_features" in x and x["traj_features"] is not None:
+                tf = x["traj_features"]
+                if torch.is_tensor(tf) and tf.dim() >= 2 and tf.size(1) != seq_len:
+                    tfl = (tfl // 4)
+            return tfl.clamp(min=0, max=seq_len)
         if "traj_length" in x and x["traj_length"] is not None:
             return (
                 (x["traj_length"].to(device=device, dtype=torch.long) // 4)

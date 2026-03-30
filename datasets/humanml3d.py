@@ -197,27 +197,34 @@ class HumanML3DDataset(Dataset):
         # mask
         ##############################
             token_mask = self.sample_token_mask(token_length)
+            # Token-level sparse mask (aligned with latent tokens).
+            output["traj_mask_token"] = token_mask
+            # Backward compatibility: older code expects traj_features_mask as token-level mask.
             output["traj_features_mask"] = token_mask
-            # traj_mask is generated from token_mask by expanding it 4x
+            # Frame-level mask: map token mask to the LAST frame in each 4-frame window.
+            # This matches aggregate_to_token_last() semantics and avoids supervising
+            # 4 frames with a single token condition.
             if "traj" in output:
-                traj_mask = np.repeat(token_mask, 4).astype(np.float32)
-                traj_length = output["traj_length"]
-                if traj_mask.shape[0] < traj_length:
-                    pad = np.zeros((traj_length - traj_mask.shape[0],), dtype=np.float32)
-                    traj_mask = np.concatenate([traj_mask, pad], axis=0)
-                else:
-                    traj_mask = traj_mask[:traj_length]
+                traj_length = int(output["traj_length"])
+                traj_mask = np.zeros((traj_length,), dtype=np.float32)
+                if traj_length > 0 and token_length > 0:
+                    idx = np.minimum(
+                        (np.arange(1, token_length + 1) * 4 - 1).astype(np.int64),
+                        traj_length - 1,
+                    )
+                    keep = token_mask.astype(bool)
+                    traj_mask[idx[keep]] = 1.0
                 output["traj_mask"] = traj_mask
         ##############################
-        # traj_features：[x,z,cos ψ,sin ψ]，ψ 为 xz 路径朝向（与推理仅路径条件对齐）
+        # traj_features_token: (T_token,4) token-level condition features (last-frame rule)
         ##############################
-        if "feature" in output and "token" in output:
-            traj_features = path_heading_features_from_root_xyz(output["traj"])
-            traj_features = self.aggregate_to_token_last(
-                traj_features, output["token_length"]
+        if "traj" in output and "token" in output:
+            traj_features_frame = path_heading_features_from_root_xyz(output["traj"])
+            traj_features_token = self.aggregate_to_token_last(
+                traj_features_frame, output["token_length"]
             )
-            output["traj_features"] = traj_features
-            output["traj_features_length"] = len(traj_features)
+            output["traj_features"] = traj_features_token
+            output["traj_features_length"] = len(traj_features_token)
         ##############################
         # text
         ##############################
@@ -308,7 +315,7 @@ def collate_fn(batch):
             output[key] = torch.nn.utils.rnn.pad_sequence(
                 items, batch_first=True, padding_value=0
             )
-        elif key in ["traj_mask", "traj_features_mask"]:
+        elif key in ["traj_mask", "traj_mask_token", "traj_features_mask"]:
             # Pad traj_mask to (B, T_max), padding 填 0
             items = [
                 torch.from_numpy(b[key])

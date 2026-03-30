@@ -156,10 +156,16 @@ def create_skeleton_trimesh(joints, chains):
 def create_trajectory_mesh(pts, radius=0.01, color=[0, 0, 1, 1]):
     """Small‐sphere approximation of a line of pts."""
     spheres = []
+    point_color = np.asarray(color, dtype=np.float32).reshape(-1)
+    if point_color.shape[0] < 4:
+        point_color = np.concatenate(
+            [point_color[:3], np.ones((1,), dtype=np.float32)], axis=0
+        )
+    point_color = np.clip(point_color[:4], 0.0, 1.0)
     for p in pts:
         sph = trimesh.creation.icosphere(subdivisions=1, radius=radius)
         sph.apply_translation(p)
-        sph.visual.vertex_colors = np.tile([0.0, 0.0, 1.0, 1.0], (len(sph.vertices), 1))
+        sph.visual.vertex_colors = np.tile(point_color, (len(sph.vertices), 1))
         spheres.append(sph)
     return trimesh.util.concatenate(spheres) if spheres else trimesh.Trimesh()
 
@@ -167,7 +173,15 @@ def create_trajectory_mesh(pts, radius=0.01, color=[0, 0, 1, 1]):
 # rendering function for a skeleton structure
 # data: [N, J, 3] N for frames, J for joints
 # chains: [[J, J, ...], ...] list of chains, each chain is a list of joint indices
-def render_skeleton_video(data, chains, out_path, fps=20, frames: np.ndarray = None):
+def render_skeleton_video(
+    data,
+    chains,
+    out_path,
+    fps=20,
+    frames: np.ndarray = None,
+    traj_ref: np.ndarray = None,
+    traj_ref_mask: np.ndarray = None,
+):
     # normalize height
     data[..., 1] -= data[..., 1].min()
     traj = data[:, 0, [0, 2]]
@@ -233,9 +247,17 @@ def render_skeleton_video(data, chains, out_path, fps=20, frames: np.ndarray = N
     sk_mesh = create_skeleton_trimesh(data[0], chains, bone_colors=bone_colors)
     sk_node = scene.add(pyrender.Mesh.from_trimesh(sk_mesh, smooth=True))
 
-    # initial empty trajectory
-    traj_mesh = create_trajectory_mesh(np.zeros((0, 3)))
-    traj_node = scene.add(pyrender.Mesh.from_trimesh(traj_mesh, smooth=False))
+    # initial empty trajectories:
+    # - generated root (blue)
+    # - reference/input trajectory (red)
+    traj_gen_mesh = create_trajectory_mesh(
+        np.zeros((0, 3)), color=[0.0, 0.0, 1.0, 1.0]
+    )
+    traj_gen_node = scene.add(pyrender.Mesh.from_trimesh(traj_gen_mesh, smooth=False))
+    traj_ref_mesh = create_trajectory_mesh(
+        np.zeros((0, 3)), color=[1.0, 0.0, 0.0, 1.0]
+    )
+    traj_ref_node = scene.add(pyrender.Mesh.from_trimesh(traj_ref_mesh, smooth=False))
 
     cam_node = setup_camera(scene, sk_height, traj[0, 0], traj[0, 1])
 
@@ -253,11 +275,42 @@ def render_skeleton_video(data, chains, out_path, fps=20, frames: np.ndarray = N
         sk_mesh = create_skeleton_trimesh(data[i], chains, bone_colors=bone_colors)
         sk_node = scene.add(pyrender.Mesh.from_trimesh(sk_mesh, smooth=True))
 
-        # update trajectory
-        scene.remove_node(traj_node)
-        pts3 = np.column_stack([traj[: i + 1, 0], np.zeros(i + 1), traj[: i + 1, 1]])
-        traj_mesh = create_trajectory_mesh(pts3)
-        traj_node = scene.add(pyrender.Mesh.from_trimesh(traj_mesh, smooth=False))
+        # update generated root trajectory (blue)
+        scene.remove_node(traj_gen_node)
+        gen_pts3 = np.column_stack([traj[: i + 1, 0], np.zeros(i + 1), traj[: i + 1, 1]])
+        traj_gen_mesh = create_trajectory_mesh(
+            gen_pts3, color=[0.0, 0.0, 1.0, 1.0]
+        )
+        traj_gen_node = scene.add(pyrender.Mesh.from_trimesh(traj_gen_mesh, smooth=False))
+
+        # update reference/input trajectory (red), optionally filtered by mask
+        scene.remove_node(traj_ref_node)
+        ref_pts3 = np.zeros((0, 3), dtype=np.float32)
+        if traj_ref is not None and traj_ref.ndim == 2 and traj_ref.shape[0] > 0:
+            ref_len = min(i + 1, int(traj_ref.shape[0]))
+            ref_xz = np.asarray(traj_ref[:ref_len, :], dtype=np.float32)
+            if ref_xz.shape[1] == 3:
+                ref_xz = ref_xz[:, [0, 2]]
+            elif ref_xz.shape[1] != 2:
+                ref_xz = None
+            if ref_xz is not None:
+                if traj_ref_mask is not None:
+                    mask = np.asarray(traj_ref_mask).reshape(-1).astype(np.float32)
+                    visible_idx = np.where(mask[:ref_len] > 0.0)[0]
+                else:
+                    visible_idx = np.arange(ref_len)
+                if visible_idx.size > 0:
+                    ref_pts3 = np.column_stack(
+                        [
+                            ref_xz[visible_idx, 0],
+                            np.zeros((visible_idx.size,), dtype=np.float32),
+                            ref_xz[visible_idx, 1],
+                        ]
+                    ).astype(np.float32)
+        traj_ref_mesh = create_trajectory_mesh(
+            ref_pts3, color=[1.0, 0.0, 0.0, 1.0]
+        )
+        traj_ref_node = scene.add(pyrender.Mesh.from_trimesh(traj_ref_mesh, smooth=False))
 
         # update camera
         update_camera(scene, cam_node, sk_height, traj[i, 0], traj[i, 1])
@@ -434,6 +487,7 @@ def render_simple_skeleton_video(
     fps=20,
     frames: np.ndarray = None,
     traj_mask: np.ndarray = None,
+    traj_ref: np.ndarray = None,
     traj_mask_point_radius: int = 4,
 ):
     traj = data[:, 0, [0, 2]]  # root joint XZ trajectory
@@ -617,20 +671,43 @@ def render_simple_skeleton_video(
         # treat NaN as 0
         traj_mask = np.nan_to_num(traj_mask, nan=0.0, posinf=0.0, neginf=0.0)
 
+    # Normalize/validate traj_ref once
+    if traj_ref is not None:
+        traj_ref = np.asarray(traj_ref)
+        if traj_ref.ndim != 2 or traj_ref.shape[0] < 1 or traj_ref.shape[1] < 2:
+            traj_ref = None
+        else:
+            if traj_ref.shape[1] >= 3:
+                traj_ref = traj_ref[:, [0, 2]]
+            else:
+                traj_ref = traj_ref[:, :2]
+            if traj_ref.shape[0] < len(traj):
+                pad = np.repeat(traj_ref[-1:, :], len(traj) - traj_ref.shape[0], axis=0)
+                traj_ref = np.concatenate([traj_ref, pad], axis=0)
+            elif traj_ref.shape[0] > len(traj):
+                traj_ref = traj_ref[: len(traj)]
+
     for frame in range(len(data)):
         img = np.ones((height, width, 3), dtype=np.uint8) * 255
         joints = data[frame]
-        # Masked trajectory overlay (points only)
-        if traj_mask is not None:
-            visible_idx = np.where(traj_mask[: frame + 1] > 0.0)[0]
-            # points
+        # Draw generated root trajectory in blue.
+        for j in range(frame + 1):
+            center = world_to_screen([traj[j, 0], 0, traj[j, 1]])
+            draw_circle_vectorized(img, center, 2, [0, 0, 255])
+
+        # Draw reference/input trajectory in red.
+        if traj_ref is not None:
+            if traj_mask is not None:
+                visible_idx = np.where(traj_mask[: frame + 1] > 0.0)[0]
+            else:
+                visible_idx = np.arange(frame + 1)
             for j in visible_idx:
-                center = world_to_screen([traj[j, 0], 0, traj[j, 1]])
+                center = world_to_screen([traj_ref[j, 0], 0, traj_ref[j, 1]])
                 draw_circle_vectorized(
                     img,
                     center,
                     int(traj_mask_point_radius),
-                    [0, 0, 255],
+                    [255, 0, 0],
                 )
         # Draw bones with palette cycling per segment
         color_index = 0

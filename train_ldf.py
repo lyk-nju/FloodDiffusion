@@ -141,11 +141,18 @@ class CustomLightningModule(BasicLightningModule):
             model_batch["traj"] = batch["traj"]
             model_batch["traj_length"] = batch["traj_length"]
             model_batch["traj_mask"] = batch["traj_mask"]
+        # Frame-level traj features (T,4); token-level sparse mask (T_token,)
         if "traj_features" in batch:
             model_batch["traj_features"] = batch["traj_features"]
-            model_batch["traj_features_length"] = batch["traj_features_length"]
-            if "traj_features_mask" in batch:
-                model_batch["traj_features_mask"] = batch["traj_features_mask"]
+            model_batch["traj_features_length"] = batch.get("traj_features_length", None)
+        if "traj_mask_token" in batch:
+            model_batch["traj_mask_token"] = batch["traj_mask_token"]
+        # Backward compat: token-level mask sometimes named traj_features_mask.
+        if "traj_features_mask" in batch and "traj_mask_token" not in batch:
+            model_batch["traj_mask_token"] = batch["traj_features_mask"]
+        # Pass aggregate mode so model-side conversion is deterministic.
+        if "traj_aggregate_mode" in batch:
+            model_batch["traj_aggregate_mode"] = batch["traj_aggregate_mode"]
 
     def _step(self, batch, is_training=True):
         # Create a copy and replace motion fields with token fields
@@ -306,6 +313,23 @@ class CustomLightningModule(BasicLightningModule):
                         f"{self.cfg.save_dir}/{single_dataset_id}/traj_mask/{single_generated_id}.npy",
                         traj_mask_i,
                     )
+                # Save reference trajectory from batch for visualization overlay.
+                if "traj" in batch:
+                    L_feat = int(decoded_single_generated.shape[0])
+                    traj_ref_i = batch["traj"][i]
+                    if torch.is_tensor(traj_ref_i):
+                        traj_ref_i = traj_ref_i.detach().cpu().numpy()
+                    traj_ref_i = np.asarray(traj_ref_i)
+                    if traj_ref_i.ndim == 2 and traj_ref_i.shape[-1] >= 3:
+                        traj_ref_i = traj_ref_i[:L_feat, :3]
+                        os.makedirs(
+                            f"{self.cfg.save_dir}/{single_dataset_id}/traj_ref",
+                            exist_ok=True,
+                        )
+                        np.save(
+                            f"{self.cfg.save_dir}/{single_dataset_id}/traj_ref/{single_generated_id}.npy",
+                            traj_ref_i,
+                        )
                 # Save text_end if available
                 if frames is not None:
                     os.makedirs(
@@ -335,6 +359,7 @@ class CustomLightningModule(BasicLightningModule):
                     render_setting=self.cfg.test_setting,
                     frames_dir=f"{self.cfg.save_dir}/{dataset_id}/frames",
                     traj_mask_dir=f"{self.cfg.save_dir}/{dataset_id}/traj_mask",
+                    traj_ref_dir=f"{self.cfg.save_dir}/{dataset_id}/traj_ref",
                 )
 
                 # Create composite videos

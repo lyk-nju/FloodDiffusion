@@ -142,28 +142,32 @@ class TestHumanML3DTrajBatch(unittest.TestCase):
             else:
                 frm_m = np.asarray(frm_m, dtype=np.float32)
 
-            expanded = np.repeat(tok_m, 4).astype(np.float32)
-            compare_len = min(expanded.shape[0], frm_m.shape[0])
+            # Frame-level mask should be the last-frame mapping of token mask:
+            # token k -> frame index (4*(k+1)-1).
+            mapped = np.zeros_like(frm_m, dtype=np.float32)
+            if tok_len > 0 and traj_len > 0:
+                idx = np.minimum(np.arange(1, tok_len + 1) * 4 - 1, traj_len - 1)
+                mapped[idx[tok_m.astype(bool)]] = 1.0
             np.testing.assert_allclose(
-                frm_m[:compare_len],
-                expanded[:compare_len],
+                frm_m,
+                mapped,
                 rtol=0,
                 atol=0,
-                err_msg=f"sample {i}: traj_mask 前段应与 repeat(traj_features_mask,4) 一致",
+                err_msg=f"sample {i}: traj_mask 应与 token mask 的 last-frame 映射一致",
             )
 
             keep_tok = float(tok_m.sum())
-            keep_frm = float(frm_m[:compare_len].sum())
+            keep_frm = float(frm_m.sum())
             print(
                 f"\n=== Task1 mask preview sample {i} ===\n"
                 f"  token_length={tok_len}  traj_length={traj_len}\n"
                 f"  traj_features_mask (token 轴, 即管线里的 token 稀疏 mask): "
                 f"sum={keep_tok:.0f}  density={keep_tok / max(tok_len, 1):.3f}\n"
                 f"  seq[{_short_seq(tok_m, 72)}]\n"
-                f"  traj_mask (帧轴, 由上一行 4× 扩展再 pad/截断到 traj_length): "
-                f"有效比对长度 compare_len={compare_len}  sum(该段)={keep_frm:.0f}\n"
-                f"  seq[{_short_seq(frm_m[: min(compare_len, 96)], 72)}]\n"
-                f"  4× 扩展校验: frm_m[:compare_len] == repeat(tok_m,4)[:compare_len]  OK"
+                f"  traj_mask (帧轴, token mask 的 last-frame 映射): "
+                f"sum={keep_frm:.0f}\n"
+                f"  seq[{_short_seq(frm_m[: min(traj_len, 96)], 72)}]\n"
+                f"  last-frame 映射校验: traj_mask == mapped_from_token_mask  OK"
             )
 
 

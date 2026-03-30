@@ -24,6 +24,7 @@ def render_single_video(
     std_np: np.ndarray = None,
     frames: np.ndarray = None,
     traj_mask: np.ndarray = None,
+    traj_ref: np.ndarray = None,
 ):
     chains = get_humanml3d_chains()
     joint_positions = convert_motion_to_joints(motion, dim, mean_np, std_np)
@@ -35,6 +36,7 @@ def render_single_video(
             fps=render_setting.get("fps", 20),
             frames=frames,
             traj_mask=traj_mask,
+            traj_ref=traj_ref,
             traj_mask_point_radius=int(render_setting.get("traj_mask_point_radius", 4)),
         )
     else:
@@ -44,6 +46,8 @@ def render_single_video(
             out_path=save_path,
             fps=render_setting.get("fps", 20),
             frames=frames,
+            traj_ref=traj_ref,
+            traj_ref_mask=traj_mask,
         )
 
 
@@ -53,6 +57,7 @@ def render_video(
     render_setting,
     frames_dir: str = None,
     traj_mask_dir: str = None,
+    traj_ref_dir: str = None,
 ):
     os.makedirs(save_dir, exist_ok=True)
     motion_path = Path(motion_dir)
@@ -79,6 +84,11 @@ def render_video(
             mask_path = os.path.join(traj_mask_dir, npy_file.name)
             if os.path.exists(mask_path):
                 traj_mask = np.load(mask_path)
+        traj_ref = None
+        if traj_ref_dir is not None and os.path.exists(traj_ref_dir):
+            traj_ref_path = os.path.join(traj_ref_dir, npy_file.name)
+            if os.path.exists(traj_ref_path):
+                traj_ref = np.load(traj_ref_path)
 
         if frames_dir is not None and os.path.exists(frames_dir):
             frames_path = os.path.join(frames_dir, npy_file.name)
@@ -96,6 +106,7 @@ def render_video(
                 std_np=std_np,
                 frames=frames,
                 traj_mask=traj_mask,
+                traj_ref=traj_ref,
             )
         except Exception as e:
             print(f"Error rendering {npy_file}: {e}")

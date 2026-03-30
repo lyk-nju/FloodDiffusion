@@ -33,7 +33,7 @@ logger:
 trainer: # lightning trainer
     max_steps: 300000
     accelerator: gpu
-    devices: [3]
+    devices: [4]
     log_every_n_steps: 100
     precision: bf16-mixed
 validation:
@@ -117,7 +117,7 @@ model:
         traj_drop_out: 0.1
         traj_aggregate_mode: "last"   # 数据侧轨迹聚合策略（Task1/6 文档键）
         use_traj_emb_cache: true      # 推理流式 traj_emb 缓存（Task3）
-        control_loss_weight: 0.2  # MotionLCM-style explicit trajectory alignment
+        control_loss_weight: 0.8  # MotionLCM-style explicit trajectory alignment
         freeze_backbone_for_traj: true  # 只微调轨迹分支（文本 & 主干冻结）
 
 optimizer:
