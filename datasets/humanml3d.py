@@ -5,7 +5,7 @@ from typing import Dict, List
 import numpy as np
 import torch
 from lightning.pytorch.utilities import rank_zero_info
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
@@ -22,6 +22,7 @@ class HumanML3DDataset(Dataset):
         self.cfg = cfg
         self.split = split
         self.stream_mode = cfg.data.get("stream_mode", False)
+        self.mask_ratio = cfg.data.get("mask_ratio", (0.2, 0.3))
         if self.split == "train":
             self.file_list = cfg.data.train_meta_paths
             self.min_length = cfg.data.min_length
@@ -176,15 +177,10 @@ class HumanML3DDataset(Dataset):
             feature, feature_length, crop_start = self.process_feature(data["feature"])
             output["feature"] = feature
             output["feature_length"] = feature_length
-        ##############################
-        # traj
-        ##############################
             traj = extract_root_trajectory_263(feature)
             output["traj"] = traj
             output["traj_length"] = len(traj)
-        ##############################
-        # token
-        ##############################
+
         if "token" in data:
             token, token_length = self.process_token(
                 data["token"],
@@ -193,12 +189,8 @@ class HumanML3DDataset(Dataset):
             )
             output["token"] = token
             output["token_length"] = token_length
-        ##############################
-        # mask
-        ##############################
             token_mask = self.sample_token_mask(token_length)
-            output["traj_features_mask"] = token_mask
-            # traj_mask is generated from token_mask by expanding it 4x
+            output["token_mask"] = token_mask
             if "traj" in output:
                 traj_mask = np.repeat(token_mask, 4).astype(np.float32)
                 traj_length = output["traj_length"]
@@ -208,16 +200,11 @@ class HumanML3DDataset(Dataset):
                 else:
                     traj_mask = traj_mask[:traj_length]
                 output["traj_mask"] = traj_mask
-        ##############################
-        # traj_features：[x,z,cos ψ,sin ψ]，ψ 为 xz 路径朝向（与推理仅路径条件对齐）
-        ##############################
-        if "feature" in output and "token" in output:
+
+        # 帧级 traj_features (T,4)=[x,z,cos,sin]，与模型 FlexTraj / 可视化 cond_traj 前两维一致
+        if "traj" in output and "token" in output:
             traj_features = path_heading_features_from_root_xyz(output["traj"])
-            traj_features = self.aggregate_to_token_last(
-                traj_features, output["token_length"]
-            )
             output["traj_features"] = traj_features
-            output["traj_features_length"] = len(traj_features)
         ##############################
         # text
         ##############################
@@ -271,20 +258,18 @@ class HumanML3DDataset(Dataset):
         to_tag = text_dict["to_tag"]
         return text, text_tokens, f_tag, to_tag
 
-    def aggregate_to_token_last(self, arr: np.ndarray, token_length: int) -> np.ndarray:
-        """Downsample frame-level array to token-level with last-frame rule."""
-        if token_length <= 0:
-            return arr[:0]
-        frame_length = arr.shape[0]
-        indices = np.minimum(np.arange(1, token_length + 1) * 4 - 1, frame_length - 1)
-        return arr[indices]
-
     def sample_token_mask(self, token_length: int) -> np.ndarray:
-        """Sample sparse observation mask on token timeline (~20-30% kept)."""
         if token_length <= 0:
             return np.zeros((0,), dtype=np.float32)
         mask = np.zeros(token_length, dtype=np.float32)
-        n_keep = max(1, int(token_length * random.uniform(0.2, 0.3)))
+        r = self.mask_ratio
+        if isinstance(r, (list, tuple, ListConfig)) and len(r) == 2:
+            r0, r1 = float(r[0]), float(r[1])
+            keep_ratio = random.uniform(min(r0, r1), max(r0, r1))
+        else:
+            keep_ratio = float(r)
+        keep_ratio = max(0.0, min(1.0, keep_ratio))
+        n_keep = max(1, int(round(token_length * keep_ratio)))
         indices = random.sample(range(token_length), n_keep)
         mask[indices] = 1.0
         return mask
@@ -308,8 +293,8 @@ def collate_fn(batch):
             output[key] = torch.nn.utils.rnn.pad_sequence(
                 items, batch_first=True, padding_value=0
             )
-        elif key in ["traj_mask", "traj_features_mask"]:
-            # Pad traj_mask to (B, T_max), padding 填 0
+        elif key in ["traj_mask", "token_mask"]:
+            # Pad mask to (B, T_max), padding 填 0
             items = [
                 torch.from_numpy(b[key])
                 if isinstance(b[key], np.ndarray)
@@ -319,7 +304,7 @@ def collate_fn(batch):
             output[key] = torch.nn.utils.rnn.pad_sequence(
                 items, batch_first=True, padding_value=0
             )
-        elif key in ["feature_length", "token_length", "traj_length", "traj_features_length"]:
+        elif key in ["feature_length", "token_length", "traj_length"]:
             # Stack scalars
             output[key] = torch.tensor([b[key] for b in batch])
         else:

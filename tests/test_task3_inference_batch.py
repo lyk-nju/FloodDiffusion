@@ -48,18 +48,20 @@ class TestTask3TrajEmbFromDataset(unittest.TestCase):
             raise unittest.SkipTest("batch missing traj_features")
 
     def test_inference_traj_emb_from_traj_features(self):
-        from models.tools.traj_encoder import TrajEncoder
+        from models.tools.traj_encoder import LocalTrajEncoder, TrajEncoder
         from utils.traj_batch import build_traj_emb_from_batch
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         b = self.batch
         B = b["traj_features"].shape[0]
         seq_len = int(b["token_length"].max().item())
+        local_enc = LocalTrajEncoder(hidden_dim=32).to(device)
         traj_enc = TrajEncoder(in_dim=4, hidden_dim=64, out_dim=32).to(device)
 
         x_in = {
             "traj_features": b["traj_features"].to(device),
-            "traj_features_mask": b.get("traj_features_mask"),
+            "token_mask": b.get("token_mask"),
+            "traj_mask": b.get("traj_mask"),
         }
         traj_emb = build_traj_emb_from_batch(
             x_in,
@@ -69,6 +71,7 @@ class TestTask3TrajEmbFromDataset(unittest.TestCase):
             use_traj_cond=True,
             traj_drop_out=0.0,
             training_dropout=False,
+            local_enc,
         )
         self.assertIsNotNone(traj_emb)
         self.assertEqual(traj_emb.shape[:2], (B, seq_len))

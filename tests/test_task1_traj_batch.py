@@ -5,9 +5,9 @@ Task1：dataloader 轨迹字段与训练管线对齐。
 - batch 是否含 ``feature`` / ``feature_length``。
 - ``traj`` 存在时：``feature_length`` 与 ``traj_length`` 逐样本一致。
 - ``token`` 存在时：``token_length`` 与 ``feature_length`` 的约 4×（VAE）关系合理。
-- ``traj_features`` 存在时：``traj_features_length`` 与 ``token_length`` 严格相等。
+- ``traj_features`` 存在时：帧级长度与 ``traj_length`` / ``feature_length`` 一致（与 FloodNet 一致）。
 - ``traj_mask`` 时间维不少于 ``traj_length``。
-- **打印**：``traj_features_mask``（token 轴稀疏 mask）与 ``traj_mask``（由 token mask 4× 扩到帧轴再 pad 到 ``traj_length``）的摘要，并校验二者 4× 关系。
+- **打印**：``token_mask``（token 轴稀疏 mask）与 ``traj_mask``（由 token mask 4× 扩到帧轴再 pad 到 ``traj_length``）的摘要，并校验二者 4× 关系。
 
 **逻辑**
 - ``setUpClass`` 调用 ``try_get_val_batch(..., max_token_length=None)`` 拉 **真实 val batch**（与旧脚本一致）。
@@ -78,18 +78,19 @@ class TestHumanML3DTrajBatch(unittest.TestCase):
                 f"sample {i}: token_length={tok_len} vs feature_length={feat_len}",
             )
 
-    def test_traj_features_token_length(self):
+    def test_traj_features_frame_length(self):
         b = self.batch
-        if "traj_features" not in b or "token" not in b:
+        if "traj_features" not in b or "traj_length" not in b:
             self.skipTest("no traj_features")
         B = b["feature"].shape[0]
         for i in range(min(4, B)):
-            tok_len = b["token_length"][i].item()
-            tfl = b["traj_features_length"][i].item()
+            traj_len = b["traj_length"][i].item()
+            tf = b["traj_features"][i]
+            n = int(tf.shape[0])
             self.assertEqual(
-                tok_len,
-                tfl,
-                f"sample {i}: token_length={tok_len} != traj_features_length={tfl}",
+                n,
+                traj_len,
+                f"sample {i}: traj_features T={n} != traj_length={traj_len}",
             )
 
     def test_traj_mask_length(self):
@@ -106,14 +107,14 @@ class TestHumanML3DTrajBatch(unittest.TestCase):
             )
 
     def test_print_token_and_traj_masks(self):
-        """打印 token 级 ``traj_features_mask`` 与帧级 ``traj_mask``，并校验 4× 扩展（与 ``humanml3d._process`` 一致）。"""
+        """打印 token 级 ``token_mask`` 与帧级 ``traj_mask``，并校验 4× 扩展。"""
         b = self.batch
-        if "traj_features_mask" not in b or "traj_mask" not in b:
-            self.skipTest("need traj_features_mask and traj_mask")
+        if "token_mask" not in b or "traj_mask" not in b:
+            self.skipTest("need token_mask and traj_mask")
         if "token_length" not in b or "traj_length" not in b:
             self.skipTest("need token_length and traj_length")
 
-        B = b["traj_features_mask"].shape[0]
+        B = b["token_mask"].shape[0]
         n_show = min(B, 4)
 
         def _short_seq(arr: np.ndarray, width: int = 64) -> str:
@@ -131,7 +132,7 @@ class TestHumanML3DTrajBatch(unittest.TestCase):
         for i in range(n_show):
             tok_len = int(b["token_length"][i].item())
             traj_len = int(b["traj_length"][i].item())
-            tok_m = b["traj_features_mask"][i, :tok_len]
+            tok_m = b["token_mask"][i, :tok_len]
             frm_m = b["traj_mask"][i, :traj_len]
             if isinstance(tok_m, torch.Tensor):
                 tok_m = tok_m.detach().float().cpu().numpy()
@@ -149,7 +150,7 @@ class TestHumanML3DTrajBatch(unittest.TestCase):
                 expanded[:compare_len],
                 rtol=0,
                 atol=0,
-                err_msg=f"sample {i}: traj_mask 前段应与 repeat(traj_features_mask,4) 一致",
+                err_msg=f"sample {i}: traj_mask 前段应与 repeat(token_mask,4) 一致",
             )
 
             keep_tok = float(tok_m.sum())
@@ -157,7 +158,7 @@ class TestHumanML3DTrajBatch(unittest.TestCase):
             print(
                 f"\n=== Task1 mask preview sample {i} ===\n"
                 f"  token_length={tok_len}  traj_length={traj_len}\n"
-                f"  traj_features_mask (token 轴, 即管线里的 token 稀疏 mask): "
+                f"  token_mask (token 轴稀疏 mask): "
                 f"sum={keep_tok:.0f}  density={keep_tok / max(tok_len, 1):.3f}\n"
                 f"  seq[{_short_seq(tok_m, 72)}]\n"
                 f"  traj_mask (帧轴, 由上一行 4× 扩展再 pad/截断到 traj_length): "

@@ -17,6 +17,8 @@ test_setting:
     render: true
     simple: true
     recover_dim: 263
+    traj_mask_point_radius: 4
+    cond_traj_point_radius: 5
     HumanML3D:
         compare_folders:
             - "${dirs.raw_data}/HumanML3D/animations"
@@ -33,7 +35,7 @@ logger:
 trainer: # lightning trainer
     max_steps: 300000
     accelerator: gpu
-    devices: [3]
+    devices: [0]
     log_every_n_steps: 100
     precision: bf16-mixed
 validation:
@@ -87,8 +89,8 @@ data:
     train_meta_paths:
         - ${dirs.raw_data}/HumanML3D/train.txt
     val_meta_paths:
-        - ${dirs.raw_data}/HumanML3D/val.txt
-        # - ${dirs.raw_data}/HumanML3D/test_min.txt
+        # - ${dirs.raw_data}/HumanML3D/val.txt
+        - ${dirs.raw_data}/HumanML3D/test_min.txt
         # - ${dirs.raw_data}/HumanML3D/test.txt
     test_meta_paths:
         - ${dirs.raw_data}/HumanML3D/test_min.txt
@@ -98,6 +100,7 @@ data:
     random_length: 0
     min_length: 40
     max_length: 200
+    mask_ratio: 1.0
 
 model:
     target: models.diffusion_forcing_wan.DiffForcingWanModel
@@ -115,26 +118,20 @@ model:
         traj_out_dim: 64
         lora_rank_traj: 8
         traj_drop_out: 0.1
-        traj_aggregate_mode: "last"   # 数据侧轨迹聚合策略（Task1/6 文档键）
         use_traj_emb_cache: true      # 推理流式 traj_emb 缓存（Task3）
         control_loss_weight: 0.2  # MotionLCM-style explicit trajectory alignment
         freeze_backbone_for_traj: true  # 只微调轨迹分支（文本 & 主干冻结）
 
 optimizer:
-    target: AdamW
-    params:
-        lr: 1e-5
-        betas: [0.9, 0.99]
-        weight_decay: 0.0
-        eps: 1e-8
-
-# lr_scheduler:
-#     target: diffusers.optimization.get_constant_schedule_with_warmup
-#     params:
-#         num_warmup_steps: 1000
+  target: AdamW
+  params:
+    lr: 5e-4
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+    eps: 1e-8
 
 lr_scheduler:
-    target: CosineAnnealingLR
-    params:
-        T_max: 1000
-        eta_min: 1e-7
+  target: diffusers.optimization.get_cosine_schedule_with_warmup
+  params:
+    num_warmup_steps: 2000
+    num_training_steps: ${trainer.max_steps}

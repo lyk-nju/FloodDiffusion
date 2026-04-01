@@ -1,4 +1,4 @@
-"""轨迹 batch：路径朝向 [x,z,cos,sin] 与 DiffForcing → WanModel 的轨迹编码输入。"""
+"""轨迹 batch：路径朝向 [x,z,cos,sin] 与 DiffForcing → WanModel 的轨迹 Encoding。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def path_heading_features_from_root_xyz(
     根轨迹 (T,3) 的 x,y,z → (T,4)：[x, z, cos ψ, sin ψ]。
 
     ψ 为 **xz 路径朝向**（位移差分单位化），与 `xyz_traj_to_features_4d` 逻辑一致；
-    用于数据集 `traj_features`，与仅能提供路径的推理条件对齐。
+    用于数据集 `traj_features`（帧级），与仅能提供路径的推理条件对齐。
     """
     traj_xyz = np.asarray(traj_xyz, dtype=np.float64)
     t_len = traj_xyz.shape[0]
@@ -81,44 +81,82 @@ def build_traj_emb_from_batch(
     use_traj_cond: bool,
     traj_drop_out: float,
     training_dropout: bool,
+    local_traj_encoder: torch.nn.Module | None = None,
 ) -> torch.Tensor | None:
     """
-    返回 TrajEncoder 输出 (B,T,traj_enc_dim)，供 ``WanModel.forward(..., traj_emb=...)``。
-    参数名 ``traj_emb`` 为历史兼容，语义是 **encoder 输出、尚未** ``traj_in_proj``。
-    无轨迹或 dropout 时返回 None。优先 `traj_features`；否则由 `traj` xyz 经路径朝向补四维。
+    返回 TrajEncoder 输出 (B, seq_len, traj_enc_dim)。
+
+    与 FloodNet 对齐：
+    - 默认数据为 **帧级** ``traj_features`` (B, T_frame, 4)，经 ``local_traj_encoder`` 压成 token 级再 MLP。
+    - 若 ``traj_features`` 第二维已等于 ``seq_len``，视为 **token 级**（如流式 buffer），跳过 local。
+    - ``token_mask`` 或 ``traj_mask``（帧级）做 gating；``token`` 级 mask 在 local 之后乘。
     """
     if not use_traj_cond or traj_encoder is None:
         return None
     if training_dropout and np.random.rand() <= traj_drop_out:
         return None
 
-    def align_temporal(feats: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-        if feats.shape[1] != seq_len:
-            feats = F.interpolate(
-                feats.permute(0, 2, 1),
-                size=seq_len,
-                mode="linear",
-                align_corners=False,
-            ).permute(0, 2, 1)
-        if mask is not None:
-            m = mask.to(device=device, dtype=torch.float32)
-            if m.shape[1] != seq_len:
-                m = F.interpolate(
-                    m.unsqueeze(1), size=seq_len, mode="nearest"
-                ).squeeze(1)
-            feats = feats * m.unsqueeze(-1).to(dtype=feats.dtype)
-        return feats
-
     if "traj_features" in x and x["traj_features"] is not None:
-        feats = x["traj_features"].to(device)
-        mask = x.get("traj_features_mask")
-        feats = align_temporal(feats, mask)
-    elif "traj" in x:
-        traj = x["traj"].to(device)
-        mask = x.get("traj_mask")
-        traj = align_temporal(traj, mask)
-        feats = xyz_traj_to_features_4d(traj)
+        feats_frame = x["traj_features"].to(device)
+    elif "traj" in x and x["traj"] is not None:
+        feats_frame = xyz_traj_to_features_4d(x["traj"].to(device))
     else:
         return None
 
-    return traj_encoder(feats)
+    mask_frame = None
+    if "traj_mask" in x and x["traj_mask"] is not None:
+        mask_frame = x["traj_mask"].to(device=device, dtype=torch.float32)
+    elif "token_mask" in x and x["token_mask"] is not None:
+        tm = x["token_mask"].to(device=device, dtype=torch.float32)
+        mask_frame = tm.repeat_interleave(4, dim=1)
+    if mask_frame is not None:
+        tf = feats_frame.shape[1]
+        if mask_frame.shape[1] < tf:
+            pad = mask_frame.new_zeros(mask_frame.shape[0], tf - mask_frame.shape[1])
+            mask_frame = torch.cat([mask_frame, pad], dim=1)
+        mask_frame = mask_frame[:, :tf]
+        feats_frame = feats_frame * mask_frame.unsqueeze(-1).to(dtype=feats_frame.dtype)
+
+    if feats_frame.shape[1] == seq_len:
+        feats_tok = feats_frame
+    else:
+        if local_traj_encoder is None:
+            # 旧 ckpt 无缺省时：线性插值到 seq_len（不推荐，仅兜底）
+            if feats_frame.shape[1] != seq_len:
+                feats_frame = F.interpolate(
+                    feats_frame.permute(0, 2, 1),
+                    size=seq_len,
+                    mode="linear",
+                    align_corners=False,
+                ).permute(0, 2, 1)
+            mask_tok = None
+            if "token_mask" in x and x["token_mask"] is not None:
+                mask_tok = x["token_mask"].to(device=device, dtype=torch.float32)
+            if mask_tok is not None:
+                if mask_tok.shape[1] < seq_len:
+                    pad = mask_tok.new_zeros(mask_tok.shape[0], seq_len - mask_tok.shape[1])
+                    mask_tok = torch.cat([mask_tok, pad], dim=1)
+                mask_tok = mask_tok[:, :seq_len]
+                feats_frame = feats_frame * mask_tok.unsqueeze(-1).to(dtype=feats_frame.dtype)
+            return traj_encoder(feats_frame)
+
+        need = seq_len * 4
+        tf = feats_frame.shape[1]
+        if tf < need:
+            pad = feats_frame.new_zeros(
+                feats_frame.shape[0], need - tf, feats_frame.shape[2]
+            )
+            feats_frame = torch.cat([feats_frame, pad], dim=1)
+        feats_frame = feats_frame[:, :need, :]
+        feats_4 = feats_frame.reshape(feats_frame.shape[0], seq_len, 4, 4)
+        feats_tok = local_traj_encoder(feats_4)
+
+    if "token_mask" in x and x["token_mask"] is not None:
+        tm = x["token_mask"].to(device=device, dtype=torch.float32)
+        if tm.shape[1] < seq_len:
+            pad = tm.new_zeros(tm.shape[0], seq_len - tm.shape[1])
+            tm = torch.cat([tm, pad], dim=1)
+        tm = tm[:, :seq_len]
+        feats_tok = feats_tok * tm.unsqueeze(-1).to(dtype=feats_tok.dtype)
+
+    return traj_encoder(feats_tok)

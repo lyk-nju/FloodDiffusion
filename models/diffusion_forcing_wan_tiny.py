@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
 
 from utils.traj_batch import build_traj_emb_from_batch, xyz_traj_to_features_4d
-from .tools.traj_encoder import TrajEncoder
+from .tools.traj_encoder import LocalTrajEncoder, TrajEncoder
 from .tools.wan_model import WanModel
 
 
@@ -80,7 +80,6 @@ class DiffForcingWanModel(nn.Module):
         traj_drop_out=0.1,
         use_traj_emb_cache=False,
         use_traj_kv_cache=None,
-        traj_aggregate_mode="last",
         control_loss_weight=1.0,  # used by train_ldf, not by model
         freeze_backbone_for_traj=False,
     ):
@@ -112,7 +111,6 @@ class DiffForcingWanModel(nn.Module):
             )
             use_traj_emb_cache = bool(use_traj_kv_cache)
         self.use_traj_emb_cache = use_traj_emb_cache
-        self.traj_aggregate_mode = traj_aggregate_mode
         self.ffn_dim = ffn_dim
         self.freq_dim = freq_dim
         self.num_heads = num_heads
@@ -164,10 +162,12 @@ class DiffForcingWanModel(nn.Module):
             traj_lora_rank=tlora,
         )
         if self.use_traj_cond:
+            self.local_traj_encoder = LocalTrajEncoder(hidden_dim=32)
             self.traj_encoder = TrajEncoder(
                 in_dim=self.traj_in_dim, hidden_dim=64, out_dim=self.traj_out_dim
             )
         else:
+            self.local_traj_encoder = None
             self.traj_encoder = None
         self.param_dtype = torch.float32
         self._traj_stream_version = 0
@@ -190,7 +190,10 @@ class DiffForcingWanModel(nn.Module):
                     continue
                 p.requires_grad = False
 
-            # 3) Keep TrajEncoder trainable (trajectory branch)
+            # 3) Keep trajectory encoders trainable
+            if self.local_traj_encoder is not None:
+                for p in self.local_traj_encoder.parameters():
+                    p.requires_grad = True
             if self.traj_encoder is not None:
                 for p in self.traj_encoder.parameters():
                     p.requires_grad = True
@@ -251,15 +254,10 @@ class DiffForcingWanModel(nn.Module):
             self.use_traj_cond,
             self.traj_drop_out,
             training_dropout,
+            self.local_traj_encoder,
         )
 
     def _get_traj_seq_lens(self, x, seq_len, device):
-        if "traj_features_length" in x and x["traj_features_length"] is not None:
-            return (
-                x["traj_features_length"]
-                .to(device=device, dtype=torch.long)
-                .clamp(min=0, max=seq_len)
-            )
         if "traj_length" in x and x["traj_length"] is not None:
             return (
                 (x["traj_length"].to(device=device, dtype=torch.long) // 4)
@@ -897,7 +895,7 @@ class DiffForcingWanModel(nn.Module):
         self.commit_index = 0
         self.traj_buffer = None
         self.traj_features_buffer = None
-        self.traj_features_mask_buffer = None
+        self.token_mask_buffer = None
         self._traj_stream_version = 0
         self._traj_emb_cache = {}
 
@@ -915,11 +913,11 @@ class DiffForcingWanModel(nn.Module):
             if (
                 self.traj_buffer is not None
                 or self.traj_features_buffer is not None
-                or self.traj_features_mask_buffer is not None
+                or self.token_mask_buffer is not None
             ):
                 self.traj_buffer = None
                 self.traj_features_buffer = None
-                self.traj_features_mask_buffer = None
+                self.token_mask_buffer = None
                 self._traj_stream_version += 1
                 self._traj_emb_cache = {}
             return
@@ -942,21 +940,29 @@ class DiffForcingWanModel(nn.Module):
                     self.traj_features_buffer[:, self.commit_index : self.commit_index + k, :] = tf[:, :k, :]
                     wrote = True
 
-                if "traj_features_mask" in x and x["traj_features_mask"] is not None:
-                    tm = x["traj_features_mask"]
-                    if isinstance(tm, np.ndarray):
-                        tm = torch.from_numpy(tm).float().to(device)
-                    if tm.dim() == 1:
-                        tm = tm.unsqueeze(0)
-                    if tm.dim() == 2 and tm.size(0) == self.batch_size:
-                        if self.traj_features_mask_buffer is None:
-                            self.traj_features_mask_buffer = torch.zeros(
-                                self.batch_size, buf_len, device=device, dtype=tm.dtype
+                tm_in = x.get("token_mask")
+                if tm_in is not None:
+                    if isinstance(tm_in, np.ndarray):
+                        dm = torch.from_numpy(tm_in).float().to(device)
+                    else:
+                        dm = tm_in
+                    if dm.dim() == 1:
+                        dm = dm.unsqueeze(0)
+                    if dm.dim() == 2 and dm.size(0) == self.batch_size and k > 0:
+                        if dm.size(1) < k and k % max(dm.size(1), 1) == 0:
+                            if k // dm.size(1) == 4:
+                                dm = dm.repeat_interleave(4, dim=1)
+                        if self.token_mask_buffer is None:
+                            self.token_mask_buffer = torch.zeros(
+                                self.batch_size, buf_len, device=device, dtype=dm.dtype
                             )
                         else:
-                            self.traj_features_mask_buffer = self.traj_features_mask_buffer.to(device)
-                        if k > 0:
-                            self.traj_features_mask_buffer[:, self.commit_index : self.commit_index + k] = tm[:, :k]
+                            self.token_mask_buffer = (
+                                self.token_mask_buffer.to(device)
+                            )
+                        self.token_mask_buffer[
+                            :, self.commit_index : self.commit_index + k
+                        ] = dm[:, :k].to(self.token_mask_buffer.dtype)
 
         if "traj" in x and x["traj"] is not None:
             traj_in = x["traj"]
@@ -994,8 +1000,8 @@ class DiffForcingWanModel(nn.Module):
                 return self._traj_emb_cache[key]
             feats = self.traj_features_buffer[:, start_t:end_index, :]
             mask = None
-            if self.traj_features_mask_buffer is not None:
-                mask = self.traj_features_mask_buffer[:, start_t:end_index]
+            if self.token_mask_buffer is not None:
+                mask = self.token_mask_buffer[:, start_t:end_index]
             if feats.size(1) < ctx_len:
                 pad_len = ctx_len - feats.size(1)
                 feats = torch.cat([torch.zeros(self.batch_size, pad_len, feats.size(-1), device=device, dtype=feats.dtype), feats], dim=1)
@@ -1246,15 +1252,15 @@ class DiffForcingWanModel(nn.Module):
                     ],
                     dim=1,
                 )
-            if self.traj_features_mask_buffer is not None:
-                self.traj_features_mask_buffer = torch.cat(
+            if self.token_mask_buffer is not None:
+                self.token_mask_buffer = torch.cat(
                     [
-                        self.traj_features_mask_buffer[:, self.seq_len :],
+                        self.token_mask_buffer[:, self.seq_len :],
                         torch.zeros(
                             self.batch_size,
                             self.seq_len,
                             device=device,
-                            dtype=self.traj_features_mask_buffer.dtype,
+                            dtype=self.token_mask_buffer.dtype,
                         ),
                     ],
                     dim=1,

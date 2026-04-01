@@ -136,7 +136,7 @@ class TestWanForwardHumanML3DBatch(unittest.TestCase):
 
     def test_wan_forward_with_dataset_traj_emb(self):
         from models.tools.wan_model import WanModel
-        from models.tools.traj_encoder import TrajEncoder
+        from models.tools.traj_encoder import LocalTrajEncoder, TrajEncoder
         from utils.traj_batch import build_traj_emb_from_batch
 
         device = torch.device("cuda")
@@ -157,10 +157,12 @@ class TestWanForwardHumanML3DBatch(unittest.TestCase):
             x_list.append(t_i.transpose(0, 1).reshape(C, seq_len, 1, 1))
 
         traj_enc_dim = 32
+        local_enc = LocalTrajEncoder(hidden_dim=32).to(device)
         traj_enc = TrajEncoder(in_dim=4, hidden_dim=64, out_dim=traj_enc_dim).to(device)
         x_in = {
             "traj_features": b["traj_features"].to(device),
-            "traj_features_mask": b.get("traj_features_mask"),
+            "token_mask": b.get("token_mask"),
+            "traj_mask": b.get("traj_mask"),
         }
         traj_emb = build_traj_emb_from_batch(
             x_in,
@@ -170,6 +172,7 @@ class TestWanForwardHumanML3DBatch(unittest.TestCase):
             use_traj_cond=True,
             traj_drop_out=0.0,
             training_dropout=False,
+            local_enc,
         )
         self.assertIsNotNone(traj_emb)
         self.assertEqual(traj_emb.shape, (B, seq_len, traj_enc_dim))

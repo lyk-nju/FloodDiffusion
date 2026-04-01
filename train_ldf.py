@@ -14,6 +14,7 @@ from torch_ema import ExponentialMovingAverage
 
 from metrics.t2m import T2MMetrics
 from utils.motion_process import extract_root_trajectory_263_torch
+from utils.traj_batch import path_heading_features_from_root_xyz
 from utils.initialize import (
     compare_statedict_and_parameters,
     get_function,
@@ -141,11 +142,10 @@ class CustomLightningModule(BasicLightningModule):
             model_batch["traj"] = batch["traj"]
             model_batch["traj_length"] = batch["traj_length"]
             model_batch["traj_mask"] = batch["traj_mask"]
+        if "token_mask" in batch:
+            model_batch["token_mask"] = batch["token_mask"]
         if "traj_features" in batch:
             model_batch["traj_features"] = batch["traj_features"]
-            model_batch["traj_features_length"] = batch["traj_features_length"]
-            if "traj_features_mask" in batch:
-                model_batch["traj_features_mask"] = batch["traj_features_mask"]
 
     def _step(self, batch, is_training=True):
         # Create a copy and replace motion fields with token fields
@@ -291,9 +291,42 @@ class CustomLightningModule(BasicLightningModule):
                     decoded_single_generated.float().cpu().numpy(),
                 )
 
-                # Save traj_mask (if provided by dataset) so we can mask the root trajectory in visualization.
+                # Save conditioning trajectory on ground plane (T,2)=[x,z], red overlay in video (FlexTraj).
+                L_feat = int(decoded_single_generated.shape[0])
+                cond_traj = None
+                if "traj_features" in batch:
+                    cond = batch["traj_features"][i]
+                    if torch.is_tensor(cond):
+                        cond = cond.detach().cpu().numpy()
+                    cond = np.asarray(cond)
+                    if cond.ndim == 2 and cond.shape[1] >= 2:
+                        cond_traj = cond[:L_feat, :2].astype(np.float32)
+                    else:
+                        rank_zero_info(
+                            f"Skip cond_traj for {single_generated_id}: "
+                            f"traj_features bad shape {getattr(cond, 'shape', None)}"
+                        )
+                if cond_traj is None and "traj" in batch:
+                    tr = batch["traj"][i]
+                    if torch.is_tensor(tr):
+                        tr = tr.detach().cpu().numpy()
+                    tr = np.asarray(tr)[:L_feat]
+                    if tr.ndim == 2 and tr.shape[1] >= 3:
+                        cond_traj = path_heading_features_from_root_xyz(tr)[:, :2].astype(
+                            np.float32
+                        )
+                if cond_traj is not None:
+                    os.makedirs(
+                        f"{self.cfg.save_dir}/{single_dataset_id}/cond_traj",
+                        exist_ok=True,
+                    )
+                    np.save(
+                        f"{self.cfg.save_dir}/{single_dataset_id}/cond_traj/{single_generated_id}.npy",
+                        cond_traj,
+                    )
+
+                # Save traj_mask (frame-level mask aligned to conditioning / decoded length).
                 if "traj_mask" in batch:
-                    L_feat = int(decoded_single_generated.shape[0])
                     traj_mask_i = batch["traj_mask"][i]
                     if torch.is_tensor(traj_mask_i):
                         traj_mask_i = traj_mask_i.detach().cpu().numpy()
@@ -335,6 +368,7 @@ class CustomLightningModule(BasicLightningModule):
                     render_setting=self.cfg.test_setting,
                     frames_dir=f"{self.cfg.save_dir}/{dataset_id}/frames",
                     traj_mask_dir=f"{self.cfg.save_dir}/{dataset_id}/traj_mask",
+                    cond_traj_dir=f"{self.cfg.save_dir}/{dataset_id}/cond_traj",
                 )
 
                 # Create composite videos

@@ -435,6 +435,9 @@ def render_simple_skeleton_video(
     frames: np.ndarray = None,
     traj_mask: np.ndarray = None,
     traj_mask_point_radius: int = 4,
+    cond_traj: np.ndarray = None,
+    cond_traj_mask: np.ndarray = None,
+    cond_traj_point_radius: int = 5,
 ):
     traj = data[:, 0, [0, 2]]  # root joint XZ trajectory
 
@@ -617,6 +620,34 @@ def render_simple_skeleton_video(
         # treat NaN as 0
         traj_mask = np.nan_to_num(traj_mask, nan=0.0, posinf=0.0, neginf=0.0)
 
+    # Normalize cond_traj (T,2)=[x,z] and cond_traj_mask.
+    if cond_traj is not None:
+        cond_traj = np.asarray(cond_traj).astype(np.float32)
+        if cond_traj.ndim != 2 or cond_traj.shape[1] != 2:
+            raise ValueError(
+                f"cond_traj must be (T,2) [x,z], got shape={cond_traj.shape}"
+            )
+        if cond_traj.shape[0] < len(traj):
+            pad = np.zeros((len(traj) - cond_traj.shape[0], 2), dtype=np.float32)
+            cond_traj = np.concatenate([cond_traj, pad], axis=0)
+        elif cond_traj.shape[0] > len(traj):
+            cond_traj = cond_traj[: len(traj)]
+
+        if cond_traj_mask is None:
+            cond_traj_mask = traj_mask
+        if cond_traj_mask is None:
+            cond_traj_mask = np.ones((len(traj),), dtype=np.float32)
+        if cond_traj_mask is not None:
+            cond_traj_mask = np.asarray(cond_traj_mask).reshape(-1).astype(np.float32)
+            if cond_traj_mask.shape[0] < len(traj):
+                pad = np.zeros((len(traj) - cond_traj_mask.shape[0],), dtype=np.float32)
+                cond_traj_mask = np.concatenate([cond_traj_mask, pad], axis=0)
+            elif cond_traj_mask.shape[0] > len(traj):
+                cond_traj_mask = cond_traj_mask[: len(traj)]
+            cond_traj_mask = np.nan_to_num(
+                cond_traj_mask, nan=0.0, posinf=0.0, neginf=0.0
+            )
+
     for frame in range(len(data)):
         img = np.ones((height, width, 3), dtype=np.uint8) * 255
         joints = data[frame]
@@ -631,6 +662,18 @@ def render_simple_skeleton_video(
                     center,
                     int(traj_mask_point_radius),
                     [0, 0, 255],
+                )
+        # Conditioning trajectory on ground plane (red).
+        if cond_traj is not None and cond_traj_mask is not None:
+            visible_idx = np.where(cond_traj_mask[: frame + 1] > 0.0)[0]
+            for j in visible_idx:
+                xz = cond_traj[j]
+                center = world_to_screen([float(xz[0]), 0.0, float(xz[1])])
+                draw_circle_vectorized(
+                    img,
+                    center,
+                    int(cond_traj_point_radius),
+                    [255, 0, 0],
                 )
         # Draw bones with palette cycling per segment
         color_index = 0
